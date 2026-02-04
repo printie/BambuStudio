@@ -13,6 +13,9 @@ on:
         type: boolean
         default: false
   push:
+    branches:
+      - master
+      - main
     tags:
       - 'v*'
 
@@ -47,8 +50,11 @@ jobs:
         run: |
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            short_sha=$(git rev-parse --short "${GITHUB_SHA}")
+            echo "tag=nightly-$(date +'%Y%m%d')-${short_sha}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Download artifacts
@@ -61,5 +67,6 @@ jobs:
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: BambuStudio ${{ steps.tag.outputs.tag }}
-          prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ github.event_name != 'workflow_dispatch' || inputs.prerelease }}
           files: release-artifacts/**
