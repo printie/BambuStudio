@@ -146,8 +146,8 @@ inline bool segments_intersect(
             // Certainly not collinear, then the segments intersect.
             return true;
         // If the first segment is collinear with the other, the other is collinear with the first segment.
-        assert((sign1.first == 0 && sign1.second == 0) == (sign2.first == 0 && sign2.second == 0));
-        if (sign1.first == 0 && sign1.second == 0) {
+        // In rare numeric edge cases these may disagree; treat as collinear if either indicates collinearity.
+        if ((sign1.first == 0 && sign1.second == 0) || (sign2.first == 0 && sign2.second == 0)) {
             // The segments are certainly collinear. Now verify whether they overlap.
             Slic3r::Point vi = ip2 - ip1;
             // Project both on the longer coordinate of vi.

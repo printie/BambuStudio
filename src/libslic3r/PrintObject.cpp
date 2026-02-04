@@ -21,6 +21,8 @@
 #include "AABBTreeLines.hpp"
 
 #include <float.h>
+#include <algorithm>
+#include <limits>
 #include <string_view>
 #include <utility>
 
@@ -319,53 +321,112 @@ std::vector<std::set<int>> PrintObject::detect_extruder_geometric_unprintables()
 
 std::unordered_map<int, std::unordered_map<int, double>> PrintObject::calc_estimated_filament_print_time() const
 {
-    auto                     full_print_config             = this->print()->m_ori_full_print_config;
-    std::vector<std::string> extruder_variant_list         = this->print()->config().printer_extruder_variant.values;
-    std::vector<std::string> filament_variant_list         = full_print_config.option<ConfigOptionStrings>("filament_extruder_variant")->values;
-    std::vector<int>         filament_self_idx             = full_print_config.option<ConfigOptionInts>("filament_self_index")->values;
-    std::vector<double>      filament_max_volumetric_speed = full_print_config.option<ConfigOptionFloats>("filament_max_volumetric_speed")->values;
-    std::vector<double>      filament_flow_ratio           = full_print_config.option<ConfigOptionFloats>("filament_flow_ratio")->values;
+    auto *print_ref = this->print();
+    if (!print_ref)
+        return {};
+    auto                     full_print_config             = print_ref->m_ori_full_print_config;
+    std::vector<std::string> extruder_variant_list         = print_ref->config().printer_extruder_variant.values;
+    auto *                   filament_variant_opt          = full_print_config.option<ConfigOptionStrings>("filament_extruder_variant");
+    auto *                   filament_self_idx_opt         = full_print_config.option<ConfigOptionInts>("filament_self_index");
+    auto *                   filament_max_vol_speed_opt    = full_print_config.option<ConfigOptionFloats>("filament_max_volumetric_speed");
+    auto *                   filament_flow_ratio_opt       = full_print_config.option<ConfigOptionFloats>("filament_flow_ratio");
+    std::vector<std::string> filament_variant_list         = filament_variant_opt ? filament_variant_opt->values : std::vector<std::string>{};
+    std::vector<int>         filament_self_idx             = filament_self_idx_opt ? filament_self_idx_opt->values : std::vector<int>{};
+    std::vector<double>      filament_max_volumetric_speed = filament_max_vol_speed_opt ? filament_max_vol_speed_opt->values : std::vector<double>{};
+    std::vector<double>      filament_flow_ratio           = filament_flow_ratio_opt ? filament_flow_ratio_opt->values : std::vector<double>{};
+
+    const double infinity = std::numeric_limits<double>::infinity();
 
     auto get_limit_from_volumetric_speed = [&](int filament_idx, int extruder_idx, double width, double height) {
+        if (filament_idx < 0)
+            return infinity;
+        if (extruder_idx < 0 || extruder_idx >= static_cast<int>(extruder_variant_list.size()))
+            return infinity;
+        if (filament_self_idx.empty() || filament_variant_list.empty() || filament_max_volumetric_speed.empty() || filament_flow_ratio.empty())
+            return infinity;
+
         std::string extruder_variant = extruder_variant_list[extruder_idx];
 
-        int idx_for_filament = 0;
+        int idx_for_filament = -1;
         for (size_t idx = 0; idx < filament_self_idx.size(); ++idx) {
             if (filament_self_idx[idx] - 1 == filament_idx && extruder_variant == filament_variant_list[idx]) {
-                idx_for_filament = idx;
+                idx_for_filament = static_cast<int>(idx);
                 break;
             }
         }
+
+        if (idx_for_filament < 0)
+            idx_for_filament = 0;
+
+        if (idx_for_filament >= static_cast<int>(filament_max_volumetric_speed.size()) ||
+            idx_for_filament >= static_cast<int>(filament_flow_ratio.size()))
+            return infinity;
 
         double max_volumetric_speed = filament_max_volumetric_speed[idx_for_filament];
         double flow_ratio           = filament_flow_ratio[idx_for_filament];
 
         double mm3_per_mm = height * (width - height * (1 - PI / 4)) * flow_ratio;
+        if (mm3_per_mm <= 0.0)
+            return infinity;
+
         return max_volumetric_speed / mm3_per_mm;
     };
 
-    auto get_speed_from_role_with_filament = [](ExtrusionRole role, int filament_id, const PrintRegionConfig &region_config, const PrintConfig &print_config, int extruder_id) -> double {
+    auto get_speed_from_role_with_filament = [&](ExtrusionRole role, int filament_id, const PrintRegionConfig &region_config, const PrintConfig &print_config, int extruder_id) -> double {
+        auto safe_speed = [&](const auto &opt, double fallback) -> double {
+            if (opt.values.empty())
+                return fallback;
+            int safe = extruder_id;
+            if (safe < 0)
+                safe = 0;
+            if (safe >= static_cast<int>(opt.values.size()))
+                safe = static_cast<int>(opt.values.size()) - 1;
+            return opt.values[safe];
+        };
+
+        auto safe_filament_bool = [&](const auto &opt) -> bool {
+            if (opt.values.empty())
+                return false;
+            int safe = filament_id;
+            if (safe < 0)
+                safe = 0;
+            if (safe >= static_cast<int>(opt.values.size()))
+                safe = static_cast<int>(opt.values.size()) - 1;
+            return opt.values[safe] != 0;
+        };
+
+        auto safe_filament_speed = [&](const auto &opt, double fallback) -> double {
+            if (opt.values.empty())
+                return fallback;
+            int safe = filament_id;
+            if (safe < 0)
+                safe = 0;
+            if (safe >= static_cast<int>(opt.values.size()))
+                safe = static_cast<int>(opt.values.size()) - 1;
+            return opt.values[safe];
+        };
+
         switch (role) {
-        case erPerimeter: return region_config.inner_wall_speed.values[extruder_id];
-        case erExternalPerimeter: return region_config.outer_wall_speed.values[extruder_id];
+        case erPerimeter: return safe_speed(region_config.inner_wall_speed, 1.0);
+        case erExternalPerimeter: return safe_speed(region_config.outer_wall_speed, 1.0);
         case erOverhangPerimeter:
         case erBridgeInfill:
         case erSupportTransition: {
-            bool use_filament_bridge_speed = print_config.filament_enable_overhang_speed.get_at(filament_id);
+            bool use_filament_bridge_speed = safe_filament_bool(print_config.filament_enable_overhang_speed);
 
             if (use_filament_bridge_speed)
-                return print_config.filament_bridge_speed.values[filament_id];
+                return safe_filament_speed(print_config.filament_bridge_speed, safe_speed(region_config.bridge_speed, 1.0));
             else
-                return region_config.bridge_speed.values[extruder_id];
+                return safe_speed(region_config.bridge_speed, 1.0);
         }
-        case erInternalInfill: return region_config.sparse_infill_speed.values[extruder_id];
+        case erInternalInfill: return safe_speed(region_config.sparse_infill_speed, 1.0);
         case erFloatingVerticalShell:
-        case erSolidInfill: return region_config.internal_solid_infill_speed.values[extruder_id];
-        case erTopSolidInfill: return region_config.top_surface_speed.values[extruder_id];
-        case erBottomSurface: return print_config.initial_layer_speed.values[extruder_id];
-        case erGapFill: return region_config.gap_infill_speed.values[extruder_id];
+        case erSolidInfill: return safe_speed(region_config.internal_solid_infill_speed, 1.0);
+        case erTopSolidInfill: return safe_speed(region_config.top_surface_speed, 1.0);
+        case erBottomSurface: return safe_speed(print_config.initial_layer_speed, 1.0);
+        case erGapFill: return safe_speed(region_config.gap_infill_speed, 1.0);
         }
-        return region_config.internal_solid_infill_speed.values[extruder_id];
+        return safe_speed(region_config.internal_solid_infill_speed, 1.0);
     };
 
     std::unordered_map<int, std::unordered_map<int, double>> filament_print_time;
@@ -373,6 +434,8 @@ std::unordered_map<int, std::unordered_map<int, double>> PrintObject::calc_estim
     auto process_epath = [&](int filament, int eidx, ExtrusionPath *path, double speed_from_config) {
         double speed_from_filament = get_limit_from_volumetric_speed(filament, eidx, path->width, path->height);
         double speed_applied       = std::min(speed_from_filament, speed_from_config);
+        if (!(speed_applied > 0.0))
+            speed_applied = 1.0;
         filament_print_time[filament][eidx] += unscale_(path->length()) / speed_applied;
     };
 
@@ -380,6 +443,8 @@ std::unordered_map<int, std::unordered_map<int, double>> PrintObject::calc_estim
         for (auto &path : eloop->paths) {
             double speed_from_filament = get_limit_from_volumetric_speed(filament, eidx, path.width, path.height);
             double speed_applied       = std::min(speed_from_filament, speed_from_config);
+            if (!(speed_applied > 0.0))
+                speed_applied = 1.0;
             filament_print_time[filament][eidx] += unscale_(path.length()) / speed_applied;
         }
     };
@@ -388,6 +453,8 @@ std::unordered_map<int, std::unordered_map<int, double>> PrintObject::calc_estim
         for (auto &path : empath->paths) {
             double speed_from_filament = get_limit_from_volumetric_speed(filament, eidx, path.width, path.height);
             double speed_applied       = std::min(speed_from_filament, speed_from_config);
+            if (!(speed_applied > 0.0))
+                speed_applied = 1.0;
             filament_print_time[filament][eidx] += unscale_(path.length()) / speed_applied;
         }
     };
@@ -429,12 +496,15 @@ std::unordered_map<int, std::unordered_map<int, double>> PrintObject::calc_estim
                         auto   role              = entity->role();
                         int    filament          = 0;
                         if (is_perimeter(role))
-                            filament = region.config().wall_filament - 1;
+                            filament = wall_filament;
                         else if (is_solid_infill(role))
-                            filament = region.config().solid_infill_filament - 1;
+                            filament = solid_infill_filament;
                         else if (is_infill(role))
-                            filament = region.config().sparse_infill_filament - 1;
+                            filament = sparse_infill_filament;
                         else
+                            continue;
+
+                        if (filament < 0)
                             continue;
 
                         double speed_from_config = get_speed_from_role_with_filament(role, filament, region.config(), this->print()->config(), eidx);
@@ -2659,7 +2729,16 @@ void PrintObject::bridge_over_infill()
                     [](const Line &s) { return s.a == s.b; }),
                     polygon_sections[i].end());
                 std::sort(polygon_sections[i].begin(), polygon_sections[i].end(),
-                    [](const Line &a, const Line &b) { return a.a.y() < b.b.y(); });
+                    [](const Line &a, const Line &b) {
+                        const coord_t a_low  = std::min(a.a.y(), a.b.y());
+                        const coord_t b_low  = std::min(b.a.y(), b.b.y());
+                        if (a_low == b_low) {
+                            const coord_t a_high = std::max(a.a.y(), a.b.y());
+                            const coord_t b_high = std::max(b.a.y(), b.b.y());
+                            return a_high < b_high;
+                        }
+                        return a_low < b_low;
+                    });
             }
 
             // reconstruct polygon from polygon sections

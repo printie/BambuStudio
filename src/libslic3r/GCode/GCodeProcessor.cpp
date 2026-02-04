@@ -5581,9 +5581,11 @@ void GCodeProcessor::process_T(const std::string_view command)
     if (command.length() > 1) {
         int eid = 0;
         if (! parse_number(command.substr(1), eid) || eid < 0 || eid > 254) {
-            //BBS: T255, T1000 and T1100 is used as special command for BBL machine and does not cost time. return directly
-            if ((m_flavor == gcfMarlinLegacy || m_flavor == gcfMarlinFirmware) && (command == "Tx" || command == "Tc" || command == "T?" ||
-                 eid == 1000 || eid == 1100 || eid == 255))
+            // BBS: T255, T1000, T1100 are special commands for BBL printers and do not cost time.
+            // BBS: T65535 is emitted by Bambu end gcode to deselect tools / unload AMS.
+            if ((m_flavor == gcfMarlinLegacy || m_flavor == gcfMarlinFirmware) &&
+                (command == "Tx" || command == "Tc" || command == "T?" ||
+                 eid == 1000 || eid == 1100 || eid == 255 || (s_IsBBLPrinter && eid == 65535)))
                 return;
 
             // T-1 is a valid gcode line for RepRap Firmwares (used to deselects all tools)
@@ -6533,4 +6535,3 @@ void GCodeProcessor::PreCoolingInjector::build_by_extruder_blocks(const std::vec
 }
 
 } /* namespace Slic3r */
-

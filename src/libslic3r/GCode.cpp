@@ -219,6 +219,20 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
             gcode += '\n';
     }
 
+    static int clamp_filament_id(int filament_id, const PrintConfig &config, const char *context)
+    {
+        const int filament_count = static_cast<int>(config.filament_diameter.size());
+        if (filament_count <= 0)
+            return 0;
+        if (filament_id < 0 || filament_id >= filament_count) {
+            BOOST_LOG_TRIVIAL(error)
+                << boost::format("%1%: invalid filament id %2% (count %3%), clamping to 0")
+                       % context % filament_id % filament_count;
+            return 0;
+        }
+        return filament_id;
+    }
+
 
     // Return true if tch_prefix is found in custom_gcode
     static bool custom_gcode_changes_tool(const std::string& custom_gcode, const std::string& tch_prefix, unsigned next_extruder)
@@ -644,8 +658,17 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
     std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::ToolChangeResult& tcr, int new_filament_id, double z) const
     {
         gcodegen.reset_last_acceleration();
-        if (new_filament_id != -1 && new_filament_id != tcr.new_tool)
-            throw Slic3r::InvalidArgument("Error: WipeTowerIntegration::append_tcr was asked to do a toolchange it didn't expect.");
+        auto clamp_nonneg_filament_id = [&gcodegen](int filament_id, const char *context) {
+            return (filament_id < 0) ? filament_id : clamp_filament_id(filament_id, gcodegen.config(), context);
+        };
+        int safe_new_filament_id = clamp_nonneg_filament_id(new_filament_id, "WipeTowerIntegration::append_tcr");
+        int safe_new_tool = clamp_nonneg_filament_id(tcr.new_tool, "WipeTowerIntegration::append_tcr tcr.new_tool");
+        if (safe_new_filament_id != -1 && safe_new_tool != -1 && safe_new_filament_id != safe_new_tool) {
+            BOOST_LOG_TRIVIAL(error)
+                << boost::format("WipeTowerIntegration::append_tcr: filament id %1% does not match tool %2%, clamping to %3%")
+                       % new_filament_id % tcr.new_tool % safe_new_filament_id;
+        }
+        new_filament_id = safe_new_filament_id;
 
         int new_extruder_id = get_extruder_index(*m_print_config, new_filament_id);
 
@@ -1173,6 +1196,8 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
     std::string WipeTowerIntegration::tool_change(GCode& gcodegen, int extruder_id, bool finish_layer)
     {
         std::string gcode;
+
+        extruder_id = clamp_filament_id(extruder_id, gcodegen.config(), "WipeTowerIntegration::tool_change");
 
         assert(m_layer_idx >= 0);
         if (m_layer_idx >= (int) m_tool_changes.size()) return gcode;
@@ -2351,6 +2376,21 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     //could not find non support filmanet, use fisrt print filament
     if (initial_non_support_extruder_id == (unsigned int) -1)
         initial_non_support_extruder_id = initial_extruder_id;
+
+    auto clamp_initial_filament_id = [this](unsigned int filament_id, const char *context) {
+        const size_t filament_count = m_config.filament_diameter.size();
+        if (filament_count == 0)
+            return 0u;
+        if (filament_id >= filament_count) {
+            BOOST_LOG_TRIVIAL(error)
+                << boost::format("%1%: invalid filament id %2% (count %3%), clamping to 0")
+                       % context % filament_id % filament_count;
+            return 0u;
+        }
+        return filament_id;
+    };
+    initial_extruder_id = clamp_initial_filament_id(initial_extruder_id, "GCode::export initial_extruder_id");
+    initial_non_support_extruder_id = clamp_initial_filament_id(initial_non_support_extruder_id, "GCode::export initial_non_support_extruder_id");
 
     print.throw_if_canceled();
 
@@ -4463,15 +4503,18 @@ GCode::LayerResult GCode::process_layer(
     // Extrude the skirt, brim, support, perimeters, infill ordered by the extruders.
     for (unsigned int extruder_id : layer_tools.extruders)
     {
-        auto& filament_info = get_filament_by_id(extruder_id);
+        unsigned int safe_extruder_id = static_cast<unsigned int>(
+            clamp_filament_id(static_cast<int>(extruder_id), m_config, "GCode::process_layer"));
+
+        auto& filament_info = get_filament_by_id(safe_extruder_id);
         if (print.config().print_sequence == PrintSequence::ByLayer && m_enable_label_object && print.config().support_object_skip_flush.value) {
             std::vector<size_t> filament_instances_id;
-            for (InstanceToPrint &instance : filament_to_print_instances[extruder_id]) filament_instances_id.emplace_back(instance.label_object_id);
+            for (InstanceToPrint &instance : filament_to_print_instances[safe_extruder_id]) filament_instances_id.emplace_back(instance.label_object_id);
             m_filament_instances_code = _encode_label_ids_to_base64(filament_instances_id);
         }
 
         if (has_wipe_tower) {
-            if (!m_wipe_tower->is_empty_wipe_tower_gcode(*this, extruder_id, extruder_id == layer_tools.extruders.back())) {
+            if (!m_wipe_tower->is_empty_wipe_tower_gcode(*this, safe_extruder_id, safe_extruder_id == layer_tools.extruders.back())) {
                 if (need_insert_timelapse_gcode_for_traditional && !has_insert_timelapse_gcode) {
                     bool should_insert = true;
                     if (m_config.nozzle_diameter.values.size() == 2){
@@ -4495,12 +4538,12 @@ GCode::LayerResult GCode::process_layer(
                     has_insert_wrapping_detection_gcode = true;
                 }
                 m_placeholder_parser.set("has_wipe_tower_this_layer", new ConfigOptionBool(true));
-                gcode += m_wipe_tower->tool_change(*this, extruder_id, extruder_id == layer_tools.extruders.back());
+                gcode += m_wipe_tower->tool_change(*this, safe_extruder_id, safe_extruder_id == layer_tools.extruders.back());
             }
         } else {
             if (need_insert_timelapse_gcode_for_traditional &&
                 !has_insert_timelapse_gcode &&
-                m_writer.need_toolchange(extruder_id) &&
+                m_writer.need_toolchange(safe_extruder_id) &&
                 m_config.nozzle_diameter.values.size() == 2 &&
                 writer().filament() &&
                 (get_extruder_id(writer().filament()->id()) == most_used_extruder)) {
@@ -4517,14 +4560,14 @@ GCode::LayerResult GCode::process_layer(
                 has_insert_wrapping_detection_gcode = true;
             }
             m_placeholder_parser.set("has_wipe_tower_this_layer", new ConfigOptionBool(false));
-            gcode += this->set_extruder(extruder_id, print_z);
+            gcode += this->set_extruder(safe_extruder_id, print_z);
         }
 
         // let analyzer tag generator aware of a role type change
         if (layer_tools.has_wipe_tower && m_wipe_tower)
             m_last_processor_extrusion_role = erWipeTower;
 
-        if (auto loops_it = skirt_loops_per_extruder.find(extruder_id); loops_it != skirt_loops_per_extruder.end()) {
+        if (auto loops_it = skirt_loops_per_extruder.find(safe_extruder_id); loops_it != skirt_loops_per_extruder.end()) {
             const std::pair<size_t, size_t> loops = loops_it->second;
             this->set_origin(0., 0.);
             m_avoid_crossing_perimeters.use_external_mp();
@@ -6725,6 +6768,8 @@ std::string GCode::retract(bool toolchange, bool is_last_retraction, LiftType li
 
 std::string GCode::set_extruder(unsigned int new_filament_id, double print_z, bool by_object)
 {
+    new_filament_id = static_cast<unsigned int>(
+        clamp_filament_id(static_cast<int>(new_filament_id), m_config, "GCode::set_extruder"));
     int new_extruder_id = get_extruder_id(new_filament_id);
     if (!m_writer.need_toolchange(new_filament_id))
         return "";

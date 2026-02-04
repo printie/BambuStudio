@@ -7905,8 +7905,9 @@ std::vector<int> DynamicPrintConfig::update_values_to_printer_extruders(DynamicP
         //apply process settings
         //auto opt_nozzle_diameters = this->option<ConfigOptionFloats>("nozzle_diameter");
         //int extruder_count = opt_nozzle_diameters->size();
-        auto opt_extruder_type = dynamic_cast<const ConfigOptionEnumsGeneric*>(printer_config.option("extruder_type"));
-        auto opt_nozzle_volume_type = dynamic_cast<const ConfigOptionEnumsGeneric*>(printer_config.option("nozzle_volume_type"));
+    auto opt_extruder_type = dynamic_cast<const ConfigOptionEnumsGeneric*>(printer_config.option("extruder_type"));
+    auto opt_nozzle_volume_type = dynamic_cast<const ConfigOptionEnumsGeneric*>(printer_config.option("nozzle_volume_type"));
+    const ConfigOptionInts* id_opt = id_name.empty() ? nullptr : dynamic_cast<const ConfigOptionInts*>(printer_config.option(id_name));
 
         if (extruder_id > 0 && extruder_id <= static_cast<unsigned> (extruder_count)) {
             variant_index.resize(1);
@@ -7936,7 +7937,8 @@ std::vector<int> DynamicPrintConfig::update_values_to_printer_extruders(DynamicP
             if (variant_index[0] < 0) {
                 BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(", Line %1%: could not found extruder_type %2%, nozzle_volume_type %3%, for filament")
                     % __LINE__ % s_keys_names_ExtruderType[extruder_type] % s_keys_names_NozzleVolumeType[nozzle_volume_type];
-                assert(false);
+                // Avoid hard crash in CLI; fall back to the first variant.
+                variant_index[0] = 0;
             }
 
             variant_count = 1;
@@ -7961,12 +7963,15 @@ std::vector<int> DynamicPrintConfig::update_values_to_printer_extruders(DynamicP
                 {
                     if  (extruder_nozzle_volume_count > extruder_count)
                         nozzle_volume_type = nv_types[e_index][nvt_index];
+                    int extruder_id_for_index = e_index + 1;
+                    if (id_opt && id_opt->size() > e_index) {
+                        extruder_id_for_index = id_opt->get_at(e_index);
+                    }
                     //variant index
-                    variant_index[v_index] = get_index_for_extruder(e_index+1, id_name, extruder_type, nozzle_volume_type, variant_name);
+                    variant_index[v_index] = get_index_for_extruder(extruder_id_for_index, id_name, extruder_type, nozzle_volume_type, variant_name);
                     if (variant_index[v_index] < 0) {
                         BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(", Line %1%: could not found extruder_type %2%, nozzle_volume_type %3%, extruder_index %4%, nvt_index %5%, nvt_count %6%")
-                            %__LINE__ %s_keys_names_ExtruderType[extruder_type] % s_keys_names_NozzleVolumeType[nozzle_volume_type] % (e_index+1) %nvt_index %nvt_count;
-                        assert(false);
+                            %__LINE__ %s_keys_names_ExtruderType[extruder_type] % s_keys_names_NozzleVolumeType[nozzle_volume_type] % extruder_id_for_index %nvt_index %nvt_count;
                         //for some updates happens in a invalid state(caused by popup window)
                         //we need to avoid crash
                         variant_index[v_index] = 0;

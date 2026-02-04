@@ -430,15 +430,15 @@ void PartPlate::calc_height_limit() {
 
 int PartPlate::get_right_icon_offset_bed(int i)
 {
-    if (&wxGetApp() && wxGetApp().plater()) {
-        auto offset = wxGetApp().plater()->get_right_icon_offset_bed(i);
+    auto *gui_app = wxTheApp ? dynamic_cast<GUI_App *>(wxTheApp) : nullptr;
+    if (gui_app && gui_app->plater()) {
+        auto offset = gui_app->plater()->get_right_icon_offset_bed(i);
         if (i > 0 && offset == 0) {
             return 0;
         }
         return offset == 0 ? PARTPLATE_ICON_GAP_LEFT : offset;
-    } else {
-        return PARTPLATE_ICON_GAP_LEFT;
     }
+    return PARTPLATE_ICON_GAP_LEFT;
 }
 
 void PartPlate::calc_vertex_for_plate_name(GLTexture &texture, GLModel &gl_model)
@@ -3694,9 +3694,12 @@ void PartPlateList::generate_print_polygon(ExPolygon &print_polygon)
         }
     };
     bool use_rect_grid = false;
-    if (&wxGetApp() && wxGetApp().plater()) {
-        auto pm       = wxGetApp().plater()->get_curr_printer_model();
-        use_rect_grid = (pm && pm->use_rect_grid == "true") ? true : false;
+    if (wxTheApp) {
+        auto *gui_app = dynamic_cast<GUI_App *>(wxTheApp);
+        if (gui_app && gui_app->plater()) {
+            auto pm       = gui_app->plater()->get_curr_printer_model();
+            use_rect_grid = (pm && pm->use_rect_grid == "true");
+        }
     }
     int points_count = 8;
     if (m_shape.size() == 4 && !use_rect_grid) {
@@ -6054,7 +6057,8 @@ bool PartPlateList::set_shapes(const Pointfs              &shape,
 	update_logo_texture_filename(texture_filename);
     update_plate_trans(get_plate_count());
 
-    { // prepare render data
+    auto *gui_app = wxTheApp ? dynamic_cast<GUI_App *>(wxTheApp) : nullptr;
+    if (gui_app && gui_app->plater()) { // prepare render data only when GUI is available
         ExPolygon poly;
         generate_print_polygon(poly);
         calc_triangles(poly);
@@ -6063,7 +6067,7 @@ bool PartPlateList::set_shapes(const Pointfs              &shape,
         m_print_polygon = poly;
         m_wrapping_detection_triangles.reset();
 
-		ExPolygon exclude_poly;
+        ExPolygon exclude_poly;
         generate_exclude_polygon(exclude_poly);
         calc_exclude_triangles(exclude_poly);
 

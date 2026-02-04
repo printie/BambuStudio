@@ -208,6 +208,13 @@ double interpolate_width(const ZPath& path,
     const int default_width,
     size_t idx)
 {
+    auto safe_width_at = [&](size_t z_idx) -> double {
+        if (line.points.empty() || z_idx >= line.points.size()) {
+            return default_width;
+        }
+        return line.get_width_at(z_idx);
+    };
+
     int prev_idx = idx;
     while (prev_idx >= 0 && (path[prev_idx].z() < 0 || path[prev_idx].z() >= subject_idx_range))
         --prev_idx;
@@ -223,7 +230,7 @@ double interpolate_width(const ZPath& path,
     }
     else {
         size_t prev_z_idx = path[prev_idx].z();
-        width_prev = line.get_width_at(prev_z_idx);
+        width_prev = safe_width_at(prev_z_idx);
     }
 
     if (next_idx >= path.size()) {
@@ -231,7 +238,7 @@ double interpolate_width(const ZPath& path,
     }
     else {
         size_t next_z_idx = path[next_idx].z();
-        width_next = line.get_width_at(next_z_idx);
+        width_next = safe_width_at(next_z_idx);
     }
     Point prev(path[prev_idx].x(), path[prev_idx].y());
     Point next(path[next_idx].x(), path[next_idx].y());
@@ -366,13 +373,20 @@ FloatingThickPolyline merge_lines(ZPaths lines, const std::vector<bool>& mark_fl
     auto& valid_path = merged_paths.front();
     auto& valid_mark = merged_marks.front();
 
+    auto safe_width_at = [&](size_t z_idx) -> coordf_t {
+        if (line.points.empty() || z_idx >= line.points.size()) {
+            return static_cast<coordf_t>(default_width);
+        }
+        return line.get_width_at(z_idx);
+    };
+
     for (size_t idx = 0; idx < valid_path.size(); ++idx) {
         int zvalue = valid_path[idx].z();
         res.points.emplace_back(valid_path[idx].x(), valid_path[idx].y());
         res.is_floating.emplace_back(valid_mark[idx]);
         if (0 <= zvalue && zvalue < subject_idx_range) {
-            res.width.emplace_back(line.get_width_at(prev_idx_modulo(zvalue, line.points)));
-            res.width.emplace_back(line.get_width_at(zvalue));
+            res.width.emplace_back(safe_width_at(prev_idx_modulo(zvalue, line.points)));
+            res.width.emplace_back(safe_width_at(zvalue));
         }
         else {
             double width = interpolate_width(valid_path, line, subject_idx_range, default_width, idx);

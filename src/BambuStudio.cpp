@@ -3200,16 +3200,34 @@ int CLI::run(int argc, char **argv)
         }
     }
     else {
-        if (!machine_switch && !current_nozzle_volume_type.empty())
-            new_nozzle_volume_type = current_nozzle_volume_type;
-        new_nozzle_volume_type.resize(new_extruder_count, nvtStandard);
-        if ((new_extruder_count > 1) || different_extruder) {
-            BOOST_LOG_TRIVIAL(error) << boost::format("%1%: nozzle_volume_type not found, when different_extruder or multiple extruder, new_printer_name %2%, extruder_count %3%")%__LINE__ %new_printer_name %new_extruder_count;
-            //record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
-            //flush_and_exit(CLI_INVALID_PARAMS);
+        bool loaded_from_print_config = false;
+        if (m_print_config.has("nozzle_volume_type")) {
+            auto opt_nozzle_volume_type = dynamic_cast<const ConfigOptionEnumsGeneric*>(m_print_config.option("nozzle_volume_type"));
+            if (opt_nozzle_volume_type && !opt_nozzle_volume_type->values.empty()) {
+                int nozzle_volume_type_size = opt_nozzle_volume_type->values.size();
+                new_nozzle_volume_type.resize(nozzle_volume_type_size, nvtStandard);
+                for (int i = 0; i < nozzle_volume_type_size; i++)
+                {
+                    new_nozzle_volume_type[i] = (NozzleVolumeType) (opt_nozzle_volume_type->values[i]);
+                }
+                if (new_nozzle_volume_type.size() < static_cast<size_t>(new_extruder_count))
+                    new_nozzle_volume_type.resize(new_extruder_count, nvtStandard);
+                loaded_from_print_config = true;
+            }
         }
-        else
-            BOOST_LOG_TRIVIAL(info) << boost::format("%1%: nozzle_volume_type not found, use standard by default, new_printer_name %2% extruder_count %3%")%__LINE__ %new_printer_name %new_extruder_count;
+
+        if (!loaded_from_print_config) {
+            if (!machine_switch && !current_nozzle_volume_type.empty())
+                new_nozzle_volume_type = current_nozzle_volume_type;
+            new_nozzle_volume_type.resize(new_extruder_count, nvtStandard);
+            if ((new_extruder_count > 1) || different_extruder) {
+                BOOST_LOG_TRIVIAL(error) << boost::format("%1%: nozzle_volume_type not found, when different_extruder or multiple extruder, new_printer_name %2%, extruder_count %3%")%__LINE__ %new_printer_name %new_extruder_count;
+                //record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+                //flush_and_exit(CLI_INVALID_PARAMS);
+            }
+            else
+                BOOST_LOG_TRIVIAL(info) << boost::format("%1%: nozzle_volume_type not found, use standard by default, new_printer_name %2% extruder_count %3%")%__LINE__ %new_printer_name %new_extruder_count;
+        }
     }
     new_extruder_variants.resize(new_extruder_count, "");
     const ConfigOptionEnumsGeneric *opt_extruder_type = dynamic_cast<const ConfigOptionEnumsGeneric *>(m_print_config.option("extruder_type"));

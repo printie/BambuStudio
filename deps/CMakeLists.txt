@@ -23,6 +23,10 @@
 project(BambuStudio-deps)
 cmake_minimum_required(VERSION 3.2)
 
+if (NOT DEFINED ENV{CMAKE_POLICY_VERSION_MINIMUM})
+    set(ENV{CMAKE_POLICY_VERSION_MINIMUM} 3.5)
+endif ()
+
 include(ExternalProject)
 include(ProcessorCount)
 
@@ -134,6 +138,8 @@ function(bambustudio_add_cmake_project projectname)
             -DCMAKE_CXX_COMPILER:STRING=${CMAKE_CXX_COMPILER}
             -DCMAKE_TOOLCHAIN_FILE:STRING=${CMAKE_TOOLCHAIN_FILE}
             -DBUILD_SHARED_LIBS:BOOL=OFF
+            -DCMAKE_POLICY_VERSION_MINIMUM:STRING=3.5
+            -DCMAKE_TRY_COMPILE_PLATFORM_VARIABLES:STRING=CMAKE_POLICY_VERSION_MINIMUM
             ${_cmake_osx_arch}
             "${_configs_line}"
             ${DEP_CMAKE_OPTS}

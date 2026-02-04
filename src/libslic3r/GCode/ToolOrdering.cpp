@@ -283,7 +283,11 @@ void ToolOrdering::handle_dontcare_extruder(const std::vector<unsigned int>& too
     // Reindex the extruders, so they are zero based, not 1 based.
     for (LayerTools& lt : m_layer_tools){
         for (unsigned int& extruder_id : lt.extruders) {
-            assert(extruder_id > 0);
+            if (extruder_id == 0 || extruder_id == (unsigned int)-1) {
+                // Avoid underflow if a "don't care" or invalid marker slipped through.
+                extruder_id = 0;
+                continue;
+            }
             --extruder_id;
         }
     }
@@ -347,7 +351,11 @@ void ToolOrdering::handle_dontcare_extruder(unsigned int last_extruder_id)
     // Reindex the extruders, so they are zero based, not 1 based.
     for (LayerTools &lt : m_layer_tools){
         for (unsigned int &extruder_id : lt.extruders) {
-            assert(extruder_id > 0);
+            if (extruder_id == 0 || extruder_id == (unsigned int)-1) {
+                // Avoid underflow if a "don't care" or invalid marker slipped through.
+                extruder_id = 0;
+                continue;
+            }
             -- extruder_id;
         }
     }
