@@ -30,6 +30,8 @@ jobs:
       matrix:
         include:
           - os: ubuntu-22.04
+          - os: macos-13
+            arch: x86_64
           - os: macos-15
             arch: arm64
     uses: ./.github/workflows/build_check_cache.yml
