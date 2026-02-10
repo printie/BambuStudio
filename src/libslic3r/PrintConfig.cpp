@@ -8867,6 +8867,12 @@ CLIActionsConfigDef::CLIActionsConfigDef()
     def->tooltip = L("Do not run any validity checks, such as gcode path conflicts check.");
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("skip_precheck", coBool);
+    def->label = "Skip pre-check pass";
+    def->tooltip = "Skip the initial validation-only pre-check pass when slicing all plates.";
+    def->cli_params = "option";
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("normative_check", coBool);
     def->label = "Normative check";
     def->tooltip = "Check the normative items.";
@@ -9177,6 +9183,12 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def = this->add("skip_useless_pick", coBool);
     def->label = "Skip generating useless pick/top images into 3mf";
     def->tooltip = "Skip generating useless pick/top images into 3mf";
+    def->cli_params = "option";
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("skip_gcode_export", coBool);
+    def->label = "Skip G-code export";
+    def->tooltip = "Skip writing plate G-code files after slicing (faster for estimate-only workflows).";
     def->cli_params = "option";
     def->set_default_value(new ConfigOptionBool(false));
 

@@ -1542,7 +1542,7 @@ int CLI::run(int argc, char **argv)
     //int arrange_option;
     int plate_to_slice = 0, filament_count = 0, duplicate_count = 0, real_duplicate_count = 0, current_extruder_count = 1, new_extruder_count = 1, current_printer_variant_count = 1, current_print_variant_count = 1, new_printer_variant_count = 1;
     bool first_file = true, is_bbl_3mf = false, need_arrange = true, has_thumbnails = false, up_config_to_date = false, normative_check = true, duplicate_single_object = false, use_first_fila_as_default = false, minimum_save = false, enable_timelapse = false, has_support = false;
-    bool allow_rotations = true, skip_modified_gcodes = false, avoid_extrusion_cali_region = false, skip_useless_pick = false, allow_newer_file = false, current_is_multi_extruder = false, new_is_multi_extruder = false, allow_mix_temp = false, enable_wrapping_detect = false;
+    bool allow_rotations = true, skip_modified_gcodes = false, avoid_extrusion_cali_region = false, skip_useless_pick = false, skip_gcode_export = false, allow_newer_file = false, current_is_multi_extruder = false, new_is_multi_extruder = false, allow_mix_temp = false, enable_wrapping_detect = false, skip_precheck = false;
     Semver file_version;
     Slic3r::GUI::Camera::ViewAngleType camera_view = Slic3r::GUI::Camera::ViewAngleType::Iso;
     std::map<size_t, bool> orients_requirement;
@@ -1602,6 +1602,10 @@ int CLI::run(int argc, char **argv)
     if (skip_useless_picks_option)
         skip_useless_pick = skip_useless_picks_option->value;
 
+    ConfigOptionBool* skip_gcode_export_option = m_config.option<ConfigOptionBool>("skip_gcode_export");
+    if (skip_gcode_export_option)
+        skip_gcode_export = skip_gcode_export_option->value;
+
     ConfigOptionBool* allow_newer_file_option = m_config.option<ConfigOptionBool>("allow_newer_file");
     if (allow_newer_file_option)
         allow_newer_file = allow_newer_file_option->value;
@@ -1617,6 +1621,10 @@ int CLI::run(int argc, char **argv)
     ConfigOptionBool* avoid_extrusion_cali_region_option = m_config.option<ConfigOptionBool>("avoid_extrusion_cali_region");
     if (avoid_extrusion_cali_region_option)
         avoid_extrusion_cali_region = avoid_extrusion_cali_region_option->value;
+
+    ConfigOptionBool* skip_precheck_option = m_config.option<ConfigOptionBool>("skip_precheck");
+    if (skip_precheck_option)
+        skip_precheck = skip_precheck_option->value;
 
     ConfigOptionString* pipe_option = m_config.option<ConfigOptionString>("pipe");
     if (pipe_option) {
@@ -6093,6 +6101,8 @@ int CLI::run(int argc, char **argv)
         }
         else if(opt_key=="no_check"){
             no_check = m_config.opt_bool(opt_key);
+        } else if (opt_key == "skip_precheck") {
+            // already parsed from config; affects --slice 0 pre-check behavior.
         //} else if (opt_key == "export_gcode" || opt_key == "export_sla" || opt_key == "slice") {
         } else if (opt_key == "normative_check") {
             //already processed before
@@ -6108,8 +6118,9 @@ int CLI::run(int argc, char **argv)
             //BBS: slice 0 means all plates, i means plate i;
             plate_to_slice = m_config.option<ConfigOptionInt>("slice")->value;
             sliced_plate = plate_to_slice;
-            bool pre_check = (plate_to_slice == 0)?true:false;
+            bool pre_check = (plate_to_slice == 0) && !skip_precheck;
             bool finished = false;
+            BOOST_LOG_TRIVIAL(info) << boost::format("slice pre-check enabled=%1% (plate_to_slice=%2%)") % pre_check % plate_to_slice;
 
             /*if (opt_key == "export_gcode" && printer_technology == ptSLA) {
                 boost::nowide::cerr << "error: cannot export G-code for an FFF configuration" << std::endl;
@@ -6805,12 +6816,14 @@ int CLI::run(int argc, char **argv)
                                         return thumbnails;
                                     };
 
+                                if (skip_gcode_export) {
+                                    BOOST_LOG_TRIVIAL(info) << boost::format("plate %1%: skip_gcode_export enabled, skipping G-code file write.") % (index + 1);
+                                    outfile = "skipped_by_skip_gcode_export";
+                                } else {
                                     // The outfile is processed by a PlaceholderParser.
-                                    //outfile = part_plate->get_tmp_gcode_path();
                                     if (outfile_dir.empty()) {
                                         outfile = part_plate->get_tmp_gcode_path();
-                                    }
-                                    else {
+                                    } else {
                                         outfile = outfile_dir + "/plate_" + std::to_string(index + 1) + ".gcode";
                                         part_plate->set_tmp_gcode_path(outfile);
                                     }
@@ -6818,8 +6831,7 @@ int CLI::run(int argc, char **argv)
                                     temp_time = (long long)Slic3r::Utils::get_current_milliseconds_time_utc();
                                     if (is_bbl_vendor_preset) {
                                         outfile = print_fff->export_gcode(outfile, gcode_result, nullptr);
-                                    }
-                                    else {
+                                    } else {
                                         if (!opengl_valid)
                                             opengl_valid = init_opengl_and_colors(model, colors);
                                         outfile = opengl_valid ? print_fff->export_gcode(outfile, gcode_result, cli_generate_thumbnails) : print_fff->export_gcode(outfile, gcode_result, nullptr);
@@ -6829,28 +6841,25 @@ int CLI::run(int argc, char **argv)
 
                                     if (gcode_result && gcode_result->gcode_check_result.error_code) {
                                         BOOST_LOG_TRIVIAL(error) << "plate " << index + 1 << ": found gcode unprintable! gcode_result->gcode_check_result.error_code = "
-                                                << gcode_result->gcode_check_result.error_code << std::endl;
-                                        //found gcode error
+                                                                 << gcode_result->gcode_check_result.error_code << std::endl;
                                         if (gcode_result->gcode_check_result.error_code & 0b1100) {
                                             record_exit_reson(outfile_dir, CLI_GCODE_PATH_OUTSIDE, index + 1, cli_errors[CLI_GCODE_PATH_OUTSIDE], sliced_info);
                                             flush_and_exit(CLI_GCODE_PATH_OUTSIDE);
-                                        }
-                                        else if (gcode_result->gcode_check_result.error_code & 0b10000) {
+                                        } else if (gcode_result->gcode_check_result.error_code & 0b10000) {
                                             record_exit_reson(outfile_dir, CLI_GCODE_IN_WRAPPING_DETECT_AREA, index + 1, cli_errors[CLI_GCODE_IN_WRAPPING_DETECT_AREA], sliced_info);
                                             flush_and_exit(CLI_GCODE_IN_WRAPPING_DETECT_AREA);
-                                        }
-                                        else if (gcode_result->gcode_check_result.error_code & 0b00011) {
+                                        } else if (gcode_result->gcode_check_result.error_code & 0b00011) {
                                             record_exit_reson(outfile_dir, CLI_GCODE_PATH_IN_UNPRINTABLE_AREA, index + 1, cli_errors[CLI_GCODE_PATH_IN_UNPRINTABLE_AREA], sliced_info);
                                             flush_and_exit(CLI_GCODE_PATH_IN_UNPRINTABLE_AREA);
                                         }
                                     }
 
                                     if (gcode_result && gcode_result->filament_printable_reuslt.has_value()) {
-                                        //found gcode error
-                                        BOOST_LOG_TRIVIAL(error) << "plate " << index + 1 << ": found some filament unprintable on current bed- "<< gcode_result->filament_printable_reuslt.plate_name << std::endl;
+                                        BOOST_LOG_TRIVIAL(error) << "plate " << index + 1 << ": found some filament unprintable on current bed- " << gcode_result->filament_printable_reuslt.plate_name << std::endl;
                                         record_exit_reson(outfile_dir, CLI_FILAMENT_UNPRINTABLE_ON_FIRST_LAYER, index + 1, cli_errors[CLI_FILAMENT_UNPRINTABLE_ON_FIRST_LAYER], sliced_info);
                                         flush_and_exit(CLI_FILAMENT_UNPRINTABLE_ON_FIRST_LAYER);
                                     }
+                                }
 
                                     //outfile_final = (dynamic_cast<Print*>(print))->print_statistics().finalize_output_path(outfile);
                                     //m_fff_print->export_gcode(m_temp_output_path, m_gcode_result, [this](const ThumbnailsParams& params) { return this->render_thumbnails(params); });
@@ -6878,7 +6887,7 @@ int CLI::run(int argc, char **argv)
                                     cli_status_callback(slicing_status);
                                 }
 #endif
-                                if (export_slicedata) {
+                                if (export_slicedata && !skip_gcode_export) {
                                     BOOST_LOG_TRIVIAL(info) << boost::format("plate %1% will export Slicing data to %2%")%(index+1) %export_slice_data_dir;
                                     std::string plate_dir = export_slice_data_dir+"/"+std::to_string(index+1);
                                     bool with_space = (get_logging_level() >= 4)?true:false;
@@ -6892,6 +6901,8 @@ int CLI::run(int argc, char **argv)
                                         flush_and_exit(ret);
                                     }
                                     BOOST_LOG_TRIVIAL(info) << boost::format("plate %1% exported %2% objects")%(index+1) %(sliced_plate_info.obj_cached_cnt);
+                                } else if (export_slicedata && skip_gcode_export) {
+                                    BOOST_LOG_TRIVIAL(warning) << boost::format("plate %1%: export_slicedata skipped because skip_gcode_export is enabled.") % (index + 1);
                                 }
                                 end_time = (long long)Slic3r::Utils::get_current_milliseconds_time_utc();
                                 sliced_plate_info.sliced_time = end_time - start_time;
