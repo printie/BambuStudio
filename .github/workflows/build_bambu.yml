@@ -170,12 +170,22 @@ jobs:
         shell: bash
         run: sudo chown $USER -R ./
 
+      - name: Set Linux artifact label
+        if: inputs.os == 'ubuntu-22.04' || inputs.os == 'ubuntu-24.04' || inputs.os == 'ubuntu-24.04-arm'
+        shell: bash
+        run: |
+          if [[ "${{ inputs.os }}" == "ubuntu-24.04-arm" || "${{ inputs.arch }}" == "arm64" ]]; then
+            echo "linux_artifact_platform=Linux_arm64" >> "$GITHUB_ENV"
+          else
+            echo "linux_artifact_platform=${{ inputs.os }}" >> "$GITHUB_ENV"
+          fi
+
       - name: Build slicer
         if: inputs.os == 'ubuntu-22.04' || inputs.os == 'ubuntu-24.04' || inputs.os == 'ubuntu-24.04-arm'
         shell: bash
         run: |
           ./BuildLinux.sh -isfr
-          mv -n ./build/BambuStudio_ubu64.AppImage ./build/Bambu_Studio_${{inputs.os}}_${{ env.ver }}.AppImage
+          mv -n ./build/BambuStudio_ubu64.AppImage ./build/Bambu_Studio_${{ env.linux_artifact_platform }}_${{ env.ver }}.AppImage
 
       - name: Package headless Linux CLI bundle
         if: inputs.os == 'ubuntu-22.04' || inputs.os == 'ubuntu-24.04' || inputs.os == 'ubuntu-24.04-arm'
@@ -189,7 +199,7 @@ jobs:
             exit 1
           fi
 
-          bundle_name="Bambu_Studio_${{inputs.os}}_${{ env.ver }}_headless_cli"
+          bundle_name="Bambu_Studio_${{ env.linux_artifact_platform }}_${{ env.ver }}_headless_cli"
           bundle_root="${{ github.workspace }}/build/${bundle_name}"
           rm -rf "${bundle_root}"
           mkdir -p "${bundle_root}/bin" "${bundle_root}/lib"
@@ -246,17 +256,17 @@ jobs:
         if: ${{ ! env.ACT && (inputs.os == 'ubuntu-22.04' || inputs.os == 'ubuntu-24.04' || inputs.os == 'ubuntu-24.04-arm') }}
         uses: actions/upload-artifact@v6
         with:
-          name: BambuStudio_${{inputs.os}}_${{ env.ver }}
-          path: './build/Bambu_Studio_${{inputs.os}}_${{ env.ver }}.AppImage'
+          name: BambuStudio_${{ env.linux_artifact_platform }}_${{ env.ver }}
+          path: './build/Bambu_Studio_${{ env.linux_artifact_platform }}_${{ env.ver }}.AppImage'
 
       - name: Upload artifacts Ubuntu headless CLI
         if: ${{ ! env.ACT && (inputs.os == 'ubuntu-22.04' || inputs.os == 'ubuntu-24.04' || inputs.os == 'ubuntu-24.04-arm') }}
         uses: actions/upload-artifact@v6
         with:
-          name: BambuStudio_${{inputs.os}}_${{ env.ver }}_headless_cli
+          name: BambuStudio_${{ env.linux_artifact_platform }}_${{ env.ver }}_headless_cli
           path: |
-            ./build/Bambu_Studio_${{inputs.os}}_${{ env.ver }}_headless_cli.tar.gz
-            ./build/Bambu_Studio_${{inputs.os}}_${{ env.ver }}_headless_cli.tar.gz.sha256
+            ./build/Bambu_Studio_${{ env.linux_artifact_platform }}_${{ env.ver }}_headless_cli.tar.gz
+            ./build/Bambu_Studio_${{ env.linux_artifact_platform }}_${{ env.ver }}_headless_cli.tar.gz.sha256
 
       # - name: Deploy Ubuntu release
       #   if: ${{ ! env.ACT && github.ref == 'refs/heads/main' && inputs.os == 'ubuntu-22.04' }}
