@@ -1,14 +1,31 @@
 #!/bin/sh
-APPIMAGETOOLURL="https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+set -eu
+
+HOST_ARCH="$(uname -m)"
+case "${HOST_ARCH}" in
+    x86_64|amd64)
+        APPIMAGE_ARCH="x86_64"
+        ;;
+    aarch64|arm64)
+        APPIMAGE_ARCH="aarch64"
+        ;;
+    *)
+        echo "Unsupported host architecture for appimagetool: ${HOST_ARCH}" >&2
+        exit 1
+        ;;
+esac
+
+APPIMAGETOOLURL="https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${APPIMAGE_ARCH}.AppImage"
+APPIMAGETOOL_BIN="../appimagetool-${APPIMAGE_ARCH}.AppImage"
 
 
 APP_IMAGE="@SLIC3R_APP_KEY@_ubu64.AppImage"
 
-wget ${APPIMAGETOOLURL} -O ../appimagetool.AppImage
-chmod +x ../appimagetool.AppImage
+wget ${APPIMAGETOOLURL} -O "${APPIMAGETOOL_BIN}"
+chmod +x "${APPIMAGETOOL_BIN}"
 
 if [ -f /.dockerenv ] ; then # Only run if inside of a Docker Container
-sed '0,/AI\x02/{s|AI\x02|\x00\x00\x00|}' -i  ../appimagetool.AppImage
+sed '0,/AI\x02/{s|AI\x02|\x00\x00\x00|}' -i "${APPIMAGETOOL_BIN}"
 fi
 
 sed -i -e 's#/usr#././#g' bin/@SLIC3R_APP_CMD@
@@ -40,10 +57,19 @@ EOF
 
 
 if [ -f /.dockerenv ] ; then # Only run if inside of a Docker Container
-  ../appimagetool.AppImage --appimage-extract-and-run . $([ ! -z "${container}" ] && echo '--appimage-extract-and-run')
+  "${APPIMAGETOOL_BIN}" --appimage-extract-and-run . $([ ! -z "${container}" ] && echo '--appimage-extract-and-run')
 else
-  ../appimagetool.AppImage . $([ ! -z "${container}" ] && echo '--appimage-extract-and-run')
+  "${APPIMAGETOOL_BIN}" . $([ ! -z "${container}" ] && echo '--appimage-extract-and-run')
 fi
 
-mv @SLIC3R_APP_KEY@-x86_64.AppImage ${APP_IMAGE}
+GENERATED_IMAGE="@SLIC3R_APP_KEY@-${APPIMAGE_ARCH}.AppImage"
+if [ ! -f "${GENERATED_IMAGE}" ]; then
+    GENERATED_IMAGE="$(ls -1 @SLIC3R_APP_KEY@-*.AppImage 2>/dev/null | head -n 1 || true)"
+fi
+if [ ! -f "${GENERATED_IMAGE}" ]; then
+    echo "Unable to locate generated AppImage for @SLIC3R_APP_KEY@ (expected arch: ${APPIMAGE_ARCH})" >&2
+    exit 1
+fi
+
+mv "${GENERATED_IMAGE}" "${APP_IMAGE}"
 chmod +x ${APP_IMAGE}

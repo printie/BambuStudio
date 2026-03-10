@@ -184,8 +184,16 @@ jobs:
         if: inputs.os == 'ubuntu-22.04' || inputs.os == 'ubuntu-24.04' || inputs.os == 'ubuntu-24.04-arm'
         shell: bash
         run: |
-          ./BuildLinux.sh -isfr
-          mv -n ./build/BambuStudio_ubu64.AppImage ./build/Bambu_Studio_${{ env.linux_artifact_platform }}_${{ env.ver }}.AppImage
+          ./BuildLinux.sh -cisfr
+
+          appimage_src="$(find ./build -maxdepth 2 -type f -name '*.AppImage' | grep -E '/BambuStudio(_ubu64|-.*)\.AppImage$' | head -n 1 || true)"
+          if [[ -z "${appimage_src}" ]]; then
+            echo "::error::Could not locate built BambuStudio AppImage under ./build"
+            find ./build -maxdepth 3 -type f -name '*.AppImage' -print || true
+            exit 1
+          fi
+
+          mv -n "${appimage_src}" "./build/Bambu_Studio_${{ env.linux_artifact_platform }}_${{ env.ver }}.AppImage"
 
       - name: Package headless Linux CLI bundle
         if: inputs.os == 'ubuntu-22.04' || inputs.os == 'ubuntu-24.04' || inputs.os == 'ubuntu-24.04-arm'
