@@ -207,6 +207,27 @@ jobs:
             exit 1
           fi
 
+          resources_src=""
+          while IFS= read -r candidate; do
+            if [[ -d "${candidate}" && -f "${candidate}/info/filament_info.json" ]]; then
+              resources_src="${candidate}"
+              break
+            fi
+          done < <(
+            {
+              printf '%s\n' "$(cd "$(dirname "${bin_path}")/../resources" 2>/dev/null && pwd || true)"
+              printf '%s\n' "${{ github.workspace }}/build/resources"
+              printf '%s\n' "${{ github.workspace }}/resources"
+            } | awk 'NF' | awk '!seen[$0]++'
+          )
+
+          if [[ -z "${resources_src}" ]]; then
+            echo "::error::Could not locate slicer resources directory for headless bundle"
+            echo "Checked candidates near binary and common build roots."
+            find "${{ github.workspace }}/build" -maxdepth 3 -type d -name resources -print || true
+            exit 1
+          fi
+
           bundle_name="Bambu_Studio_${{ env.linux_artifact_platform }}_${{ env.ver }}_headless_cli"
           bundle_root="${{ github.workspace }}/build/${bundle_name}"
           rm -rf "${bundle_root}"
@@ -214,6 +235,7 @@ jobs:
 
           cp "${bin_path}" "${bundle_root}/bin/bambu-studio.bin"
           chmod +x "${bundle_root}/bin/bambu-studio.bin"
+          cp -aL "${resources_src}" "${bundle_root}/resources"
 
           ldd "${bin_path}" | awk '/=> \// || /^\// { for (i = 1; i <= NF; i++) if ($i ~ /^\//) print $i }' | sort -u > "${bundle_root}/ldd-libs.txt"
 
@@ -227,11 +249,22 @@ jobs:
             cp -L "${lib}" "${bundle_root}/lib/"
           done < "${bundle_root}/ldd-libs.txt"
 
+          for required_file in \
+            "resources/info/filament_info.json" \
+            "resources/info/nozzle_info.json" \
+            "resources/profiles/BBL/cli_config.json"; do
+            if [[ ! -s "${bundle_root}/${required_file}" ]]; then
+              echo "::error::Missing required bundle resource: ${required_file}"
+              exit 1
+            fi
+          done
+
           cat > "${bundle_root}/bambu-studio" <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
           script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
           export LD_LIBRARY_PATH="${script_dir}/lib:${LD_LIBRARY_PATH:-}"
+          cd "${script_dir}"
           exec "${script_dir}/bin/bambu-studio.bin" "$@"
           EOF
           chmod +x "${bundle_root}/bambu-studio"
@@ -245,6 +278,7 @@ jobs:
 
           Notes:
           - Wrapper sets LD_LIBRARY_PATH to ./lib so it can run without host GTK packages.
+          - Bundle includes the slicer ./resources tree expected by CLI profile/material loaders.
           - This is intended for server-side CLI slicing workflows.
           EOF
 
