@@ -22,15 +22,12 @@
 #include <cstring>
 #include <iostream>
 #include <math.h>
+#include "nlohmann/json.hpp"
 
 #if defined(__linux__) || defined(__LINUX__)
 #include <condition_variable>
 #include <mutex>
 #include <boost/thread.hpp>
-//add json logic
-#include "nlohmann/json.hpp"
-
-using namespace nlohmann;
 #endif
 
 #include <boost/algorithm/string/predicate.hpp>
@@ -71,6 +68,7 @@ using namespace nlohmann;
 #include "libslic3r/ObjColorUtils.hpp"
 
 #include "BambuStudio.hpp"
+#include "DesktopParityConnector.hpp"
 //BBS: add exception handler for win32
 #include <wx/stdpaths.h>
 #ifdef WIN32
@@ -94,6 +92,7 @@ using namespace nlohmann;
 #endif /* SLIC3R_GUI */
 
 using namespace Slic3r;
+using nlohmann::json;
 
 /*typedef struct _error_message{
     int code;
@@ -154,6 +153,9 @@ std::map<int, std::string> cli_errors = {
     {CLI_GCODE_PATH_OUTSIDE, "Found G-code outside of the printable area. The issue may be caused by support, wipe tower, brim, or skirt. If the file slices normally in Bambu Studio, try moving the wipe tower further inside the build plate, as we use more conservative parameters for it during upload."},
     {CLI_GCODE_IN_WRAPPING_DETECT_AREA, "Found G-code in the wrapping detect area. Please make sure the 3mf file can be successfully sliced in the latest Bambu Studio."}
 };
+
+static bool g_cli_desktop_parity_mode       = false;
+static bool g_cli_desktop_parity_mode_known = false;
 
 typedef struct  _object_info{
     int id{0};
@@ -419,6 +421,69 @@ static PrinterTechnology get_printer_technology(const DynamicConfig &config)
     return (opt == nullptr) ? ptUnknown : opt->value;
 }
 
+static std::string classify_return_code(int code)
+{
+    switch (code) {
+    case CLI_SUCCESS:
+        return "success";
+    case CLI_FILE_NOTFOUND:
+        return "source_missing";
+    case CLI_INVALID_PARAMS:
+    case CLI_FILELIST_INVALID_ORDER:
+    case CLI_CONFIG_FILE_ERROR:
+    case CLI_MODIFIED_PARAMS_TO_PRINTER:
+        return "invalid_cli_or_config";
+    case CLI_UNSUPPORTED_OPERATION:
+    case CLI_POSTPROCESS_NOT_SUPPORTED:
+        return "unsupported_operation";
+    case CLI_DATA_FILE_ERROR:
+    case CLI_FILE_VERSION_NOT_SUPPORTED:
+    case CLI_INVALID_PRINTER_TECH:
+    case CLI_3MF_NOT_SUPPORT_MACHINE_CHANGE:
+    case CLI_3MF_NEW_MACHINE_NOT_SUPPORTED:
+    case CLI_PROCESS_NOT_COMPATIBLE:
+    case CLI_INVALID_VALUES_IN_3MF:
+    case CLI_NO_SUITABLE_OBJECTS:
+    case CLI_VALIDATE_ERROR:
+    case CLI_OBJECTS_PARTLY_INSIDE:
+    case CLI_NO_SUITABLE_OBJECTS_AFTER_SKIP:
+    case CLI_FILAMENT_NOT_MATCH_BED_TYPE:
+    case CLI_FILAMENTS_DIFFERENT_TEMP:
+    case CLI_OBJECT_COLLISION_IN_SEQ_PRINT:
+    case CLI_OBJECT_COLLISION_IN_LAYER_PRINT:
+    case CLI_SPIRAL_MODE_INVALID_PARAMS:
+    case CLI_FILAMENT_CAN_NOT_MAP:
+    case CLI_ONLY_ONE_TPU_SUPPORTED:
+    case CLI_FILAMENTS_NOT_SUPPORTED_BY_EXTRUDER:
+    case CLI_GCODE_PATH_CONFLICTS:
+    case CLI_GCODE_PATH_IN_UNPRINTABLE_AREA:
+    case CLI_FILAMENT_UNPRINTABLE_ON_FIRST_LAYER:
+    case CLI_GCODE_PATH_OUTSIDE:
+    case CLI_GCODE_IN_WRAPPING_DETECT_AREA:
+        return "invalid_or_incompatible_project";
+    case CLI_ENVIRONMENT_ERROR:
+    case CLI_OUT_OF_MEMORY:
+    case CLI_COPY_OBJECTS_ERROR:
+    case CLI_SCALE_TO_FIT_ERROR:
+    case CLI_EXPORT_STL_ERROR:
+    case CLI_EXPORT_OBJ_ERROR:
+    case CLI_EXPORT_3MF_ERROR:
+    case CLI_EXPORT_CACHE_DIRECTORY_CREATE_FAILED:
+    case CLI_EXPORT_CACHE_WRITE_FAILED:
+    case CLI_IMPORT_CACHE_NOT_FOUND:
+    case CLI_IMPORT_CACHE_DATA_CAN_NOT_USE:
+    case CLI_IMPORT_CACHE_LOAD_FAILED:
+    case CLI_SLICING_TIME_EXCEEDS_LIMIT:
+    case CLI_TRIANGLE_COUNT_EXCEEDS_LIMIT:
+    case CLI_OBJECT_ARRANGE_FAILED:
+    case CLI_OBJECT_ORIENT_FAILED:
+    case CLI_SLICING_ERROR:
+        return "runtime_or_environment";
+    default:
+        return "unknown";
+    }
+}
+
 //BBS: add flush and exit
 #if defined(__linux__) || defined(__LINUX__)
 #define flush_and_exit(ret)     { boost::nowide::cout << __FUNCTION__ << " found error, return "<<ret<<", exit..." << std::endl;\
@@ -459,9 +524,13 @@ void record_exit_reson(std::string outputdir, int code, int plate_id, std::strin
             j["upward_compatibility_taint"] = sliced_info.upward_compatibility_taint;
         j["plate_index"] = plate_id;
         j["return_code"] = code;
+        j["return_code_class"] = classify_return_code(code);
+        j["classification_source"] = "return_code";
         j["error_string"] = error_message;
         j["prepare_time"] = sliced_info.prepare_time;
         j["export_time"] = sliced_info.export_time;
+        if (g_cli_desktop_parity_mode_known)
+            j["desktop_parity_mode"] = g_cli_desktop_parity_mode;
 
         if (code != 0)
         {
@@ -543,7 +612,6 @@ void record_exit_reson(std::string outputdir, int code, int plate_id, std::strin
             j["sliced_plates"].push_back(std::move(plate_json));
         }
 
- #if defined(__linux__) || defined(__LINUX__)
         for (auto& iter: key_values)
             j[iter.first] = iter.second;
 
@@ -552,7 +620,6 @@ void record_exit_reson(std::string outputdir, int code, int plate_id, std::strin
         c << std::setw(4) << j << std::endl;
         c.close();
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" <<__LINE__ << boost::format(", saved config to %1%\n")%result_file;
- #endif
     }
     catch (...) {}
 }
@@ -1464,6 +1531,15 @@ int CLI::run(int argc, char **argv)
     long long global_begin_time = 0, global_current_time;
     sliced_info_t sliced_info;
     std::map<std::string, std::string> record_key_values;
+    const bool desktop_parity_mode = DesktopParityConnector::is_enabled(m_config);
+    const bool legacy_cli_mode = m_config.opt_bool("legacy_cli");
+    record_key_values["desktop_parity_mode"] = desktop_parity_mode ? "true" : "false";
+    record_key_values["cli_mode"] = desktop_parity_mode ? "desktop_parity" : "legacy";
+    if (legacy_cli_mode)
+        record_key_values["legacy_cli_mode"] = "true";
+
+    if (desktop_parity_mode)
+        BOOST_LOG_TRIVIAL(info) << "desktop parity mode enabled";
 
     ConfigOptionBool* downward_check_option = m_config.option<ConfigOptionBool>("downward_check");
     if (downward_check_option)
@@ -2008,9 +2084,104 @@ int CLI::run(int argc, char **argv)
                 input_index++;
             }
             catch (std::exception& e) {
-                boost::nowide::cerr << file << ": " << e.what() << std::endl;
-                record_exit_reson(outfile_dir, CLI_DATA_FILE_ERROR, 0, cli_errors[CLI_DATA_FILE_ERROR], sliced_info);
-                flush_and_exit(CLI_DATA_FILE_ERROR);
+                bool recovered_as_geometry_only = false;
+                if (DesktopParityConnector::should_retry_project_as_geometry_only(desktop_parity_mode, file)) {
+                    BOOST_LOG_TRIVIAL(warning) << "Failed to load 3mf as project config, retry as geometry-only: " << file << " reason: " << e.what();
+                    try {
+                        DynamicPrintConfig fallback_config;
+                        ConfigSubstitutionContext fallback_substitutions(config_substitution_rule);
+                        bool fallback_is_bbl_3mf = false;
+                        const LoadStrategy fallback_strategy = LoadStrategy::LoadModel | LoadStrategy::AddDefaultInstances;
+                        model = Model::read_from_file(
+                            file,
+                            &fallback_config,
+                            &fallback_substitutions,
+                            fallback_strategy,
+                            &plate_data_src,
+                            &project_presets,
+                            &fallback_is_bbl_3mf,
+                            &file_version,
+                            nullptr,
+                            nullptr,
+                            nullptr,
+                            plate_to_slice
+                        );
+                        is_bbl_3mf = false;
+                        need_arrange = true;
+
+                        int object_extruder_id = 0, clone_count = 1;
+                        if (loaded_filament_ids.size() > input_index) {
+                            if (loaded_filament_ids[input_index] > 0) {
+                                if (loaded_filament_ids[input_index] > load_filaments.size()) {
+                                    BOOST_LOG_TRIVIAL(error) << boost::format("invalid filament_id %1% at index %2%, max %3%")%loaded_filament_ids[input_index] % (input_index + 1) %load_filaments.size();
+                                    record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+                                    flush_and_exit(CLI_INVALID_PARAMS);
+                                }
+                                object_extruder_id = loaded_filament_ids[input_index];
+                                used_filament_set.emplace(object_extruder_id);
+                            }
+                        }
+
+                        if (clone_objects.size() > input_index) {
+                            if (clone_objects[input_index] > 0) {
+                                if (clone_objects[input_index] > MAX_CLONEABLE_SIZE) {
+                                    BOOST_LOG_TRIVIAL(error) << boost::format("invalid clone count %1% at index %2%, max %3%")%clone_objects[input_index] % (input_index + 1) %MAX_CLONEABLE_SIZE;
+                                    record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+                                    flush_and_exit(CLI_INVALID_PARAMS);
+                                }
+                                clone_count = clone_objects[input_index];
+                            }
+                        }
+
+                        if (clone_count > 1)
+                        {
+                            unsigned int object_count = model.objects.size();
+                            for (unsigned int obj_index = 0; obj_index < object_count; obj_index++)
+                            {
+                                ModelObject* object = model.objects[obj_index];
+                                for (int clone_index = 1; clone_index < clone_count; clone_index++)
+                                {
+                                    ModelObject* newObj = model.add_object(*object);
+                                    newObj->name = object->name +"_"+ std::to_string(clone_index+1);
+                                }
+                                object->name = object->name +"_"+ std::to_string(1);
+                            }
+                        }
+
+                        for (ModelObject* o : model.objects)
+                        {
+                            if (object_extruder_id != 0) {
+                                o->config.set_key_value("extruder", new ConfigOptionInt(object_extruder_id));
+                            }
+                            BOOST_LOG_TRIVIAL(info) << "object "<<o->name <<", id :"  << o->id().id << ", loaded with geometry-only fallback\n";
+                            o->ensure_on_bed();
+                        }
+
+                        first_file = false;
+                        PrinterTechnology other_printer_technology = get_printer_technology(fallback_config);
+                        if (printer_technology == ptUnknown) {
+                            printer_technology = other_printer_technology;
+                        }
+                        if ((printer_technology != other_printer_technology) && (other_printer_technology != ptUnknown)) {
+                            boost::nowide::cerr << "invalid printer_technology " <<printer_technology<<", from source file "<< file <<std::endl;
+                            record_exit_reson(outfile_dir, CLI_INVALID_PRINTER_TECH, 0, cli_errors[CLI_INVALID_PRINTER_TECH], sliced_info);
+                            flush_and_exit(CLI_INVALID_PRINTER_TECH);
+                        }
+                        fallback_config += std::move(m_print_config);
+                        m_print_config = std::move(fallback_config);
+                        input_index++;
+
+                        DesktopParityConnector::set_project_load_fallback_markers(record_key_values, file, e.what());
+                        recovered_as_geometry_only = true;
+                    } catch (std::exception& fallback_error) {
+                        BOOST_LOG_TRIVIAL(error) << "Geometry-only fallback failed for " << file << ", reason: " << fallback_error.what();
+                    }
+                }
+                if (!recovered_as_geometry_only) {
+                    boost::nowide::cerr << file << ": " << e.what() << std::endl;
+                    record_exit_reson(outfile_dir, CLI_DATA_FILE_ERROR, 0, cli_errors[CLI_DATA_FILE_ERROR], sliced_info);
+                    flush_and_exit(CLI_DATA_FILE_ERROR);
+                }
             }
             if (model.objects.empty()) {
                 boost::nowide::cerr << "Error: file is empty: " << file << std::endl;
@@ -2878,23 +3049,34 @@ int CLI::run(int argc, char **argv)
 
     //compute extruder variant index
     auto compute_variant_index = [](DynamicPrintConfig& full_config, const DynamicPrintConfig& new_config, std::string id_name, std::string variant_name, std::vector<int>& new_index, bool& count_changed) {
+        new_index.clear();
+        count_changed = false;
         auto curr_variant_opt = dynamic_cast<const ConfigOptionStrings*>(full_config.option(variant_name));
         auto new_variant_opt = dynamic_cast<const ConfigOptionStrings*>(new_config.option(variant_name));
         auto curr_id_opt = dynamic_cast<const ConfigOptionInts*>(full_config.option(id_name));
         auto new_id_opt = dynamic_cast<const ConfigOptionInts*>(new_config.option(id_name));
         if (!new_variant_opt || !new_id_opt) {
             BOOST_LOG_TRIVIAL(error) << boost::format("%1%:%2%, can not get %3% or %4% from new config")%__FUNCTION__ %__LINE__ % variant_name %id_name;
-            count_changed = false;
-            return;
+            return CLI_CONFIG_FILE_ERROR;
         }
+        if (new_variant_opt->size() != new_id_opt->size()) {
+            BOOST_LOG_TRIVIAL(error) << boost::format("%1%:%2%, %3%'s size %4% not equal to %5%'s size %6% in new config")
+                %__FUNCTION__ %__LINE__ % variant_name %new_variant_opt->size() %id_name %new_id_opt->size();
+            return CLI_CONFIG_FILE_ERROR;
+        }
+
+        if ((curr_variant_opt && !curr_id_opt) || (!curr_variant_opt && curr_id_opt)) {
+            BOOST_LOG_TRIVIAL(error) << boost::format("%1%:%2%, current config has inconsistent pair %3%/%4%")
+                %__FUNCTION__ %__LINE__ % variant_name %id_name;
+            return CLI_CONFIG_FILE_ERROR;
+        }
+
         int new_variant_count = new_variant_opt->size(), curr_variant_count = 0;
-        new_index.clear();
         new_index.resize(new_variant_count, -1);
         if (curr_variant_opt && curr_id_opt) {
             if (curr_variant_opt->size() != curr_id_opt->size()) {
                 BOOST_LOG_TRIVIAL(error) << boost::format("%1%:%2%, %3%'s size %4% not equal to %5%'s size %6%")%__FUNCTION__ %__LINE__ % variant_name %curr_variant_opt->size() %id_name %curr_id_opt->size();
-                count_changed = false;
-                return;
+                return CLI_CONFIG_FILE_ERROR;
             }
             curr_variant_count = curr_variant_opt->size();
             count_changed = (curr_variant_count != new_variant_count);
@@ -2917,6 +3099,7 @@ int CLI::run(int argc, char **argv)
             else if ((new_variant_opt->values[i] == "Direct Drive Standard") && (new_id_opt->values[i] == 1))
                 new_index[i] = 0;
         }
+        return 0;
     };
 
     //update seperate configs into full config
@@ -3024,7 +3207,17 @@ int CLI::run(int argc, char **argv)
         load_default_gcodes_to_config(load_machine_config, Preset::TYPE_PRINTER);
         if (new_printer_name.empty()) {
             int diff_keys_size = different_keys_set.size();
-            compute_variant_index(m_print_config, load_machine_config, "printer_extruder_id", "printer_extruder_variant", new_variant_index, variant_count_changed);
+            ret = compute_variant_index(m_print_config, load_machine_config, "printer_extruder_id", "printer_extruder_variant", new_variant_index, variant_count_changed);
+            if (ret) {
+                if (DesktopParityConnector::allow_variant_metadata_fallback(desktop_parity_mode, "machine", record_key_values)) {
+                    BOOST_LOG_TRIVIAL(warning) << "Missing/malformed printer_extruder_variant metadata during machine update. Continue with compatibility fallback.";
+                    variant_count_changed = false;
+                    new_variant_index.clear();
+                } else {
+                    record_exit_reson(outfile_dir, CLI_CONFIG_FILE_ERROR, 0, cli_errors[CLI_CONFIG_FILE_ERROR], sliced_info);
+                    flush_and_exit(CLI_CONFIG_FILE_ERROR);
+                }
+            }
             ret = update_full_config(m_print_config, load_machine_config, different_keys_set, variant_count_changed, printer_options_with_variant_1, printer_options_with_variant_2, new_variant_index, false, skip_modified_gcodes);
             if (diff_keys_size != different_keys_set.size()) {
                 //changed
@@ -3162,7 +3355,17 @@ int CLI::run(int argc, char **argv)
         load_default_gcodes_to_config(load_process_config, Preset::TYPE_PRINT);
         if (new_process_name.empty()) {
             int diff_keys_size = different_keys_set.size();
-            compute_variant_index(m_print_config, load_process_config, "print_extruder_id", "print_extruder_variant", new_variant_index, variant_count_changed);
+            ret = compute_variant_index(m_print_config, load_process_config, "print_extruder_id", "print_extruder_variant", new_variant_index, variant_count_changed);
+            if (ret) {
+                if (DesktopParityConnector::allow_variant_metadata_fallback(desktop_parity_mode, "process", record_key_values)) {
+                    BOOST_LOG_TRIVIAL(warning) << "Missing/malformed print_extruder_variant metadata during process update. Continue with compatibility fallback.";
+                    variant_count_changed = false;
+                    new_variant_index.clear();
+                } else {
+                    record_exit_reson(outfile_dir, CLI_CONFIG_FILE_ERROR, 0, cli_errors[CLI_CONFIG_FILE_ERROR], sliced_info);
+                    flush_and_exit(CLI_CONFIG_FILE_ERROR);
+                }
+            }
             ret = update_full_config(m_print_config, load_process_config, different_keys_set, variant_count_changed, print_options_with_variant, empty_options, new_variant_index, false, skip_modified_gcodes);
             if (diff_keys_size != different_keys_set.size()) {
                 //changed
@@ -3198,12 +3401,33 @@ int CLI::run(int argc, char **argv)
 
     if(m_extra_config.has("nozzle_volume_type")) {
         auto opt_nozzle_volume_type = dynamic_cast<const ConfigOptionEnumsGeneric*>(m_extra_config.option("nozzle_volume_type"));
-        if (opt_nozzle_volume_type) {
+        if (!opt_nozzle_volume_type) {
+            if (desktop_parity_mode) {
+                BOOST_LOG_TRIVIAL(warning) << "nozzle_volume_type exists in extra config but could not be parsed, fallback to standard.";
+                new_nozzle_volume_type.assign(new_extruder_count, nvtStandard);
+                record_key_values["nozzle_volume_recovery"] = "extra_config_invalid_fallback_standard";
+            } else {
+                BOOST_LOG_TRIVIAL(error) << "nozzle_volume_type exists in extra config but could not be parsed.";
+                record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+                flush_and_exit(CLI_INVALID_PARAMS);
+            }
+        } else {
             int nozzle_volume_type_size = opt_nozzle_volume_type->values.size();
             new_nozzle_volume_type.resize(nozzle_volume_type_size, nvtStandard);
             for (int i = 0; i < nozzle_volume_type_size; i++)
             {
                 new_nozzle_volume_type[i] = (NozzleVolumeType) (opt_nozzle_volume_type->values[i]);
+            }
+            if (new_nozzle_volume_type.size() < static_cast<size_t>(new_extruder_count)) {
+                if (desktop_parity_mode) {
+                    new_nozzle_volume_type.resize(new_extruder_count, nvtStandard);
+                    BOOST_LOG_TRIVIAL(warning) << "nozzle_volume_type count mismatch, recovered by standard fallback for missing extruders.";
+                    record_key_values["nozzle_volume_recovery"] = "count_mismatch_fallback_standard";
+                } else {
+                    BOOST_LOG_TRIVIAL(error) << "nozzle_volume_type count mismatch in extra config.";
+                    record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+                    flush_and_exit(CLI_INVALID_PARAMS);
+                }
             }
         }
     }
@@ -3229,9 +3453,18 @@ int CLI::run(int argc, char **argv)
                 new_nozzle_volume_type = current_nozzle_volume_type;
             new_nozzle_volume_type.resize(new_extruder_count, nvtStandard);
             if ((new_extruder_count > 1) || different_extruder) {
-                BOOST_LOG_TRIVIAL(error) << boost::format("%1%: nozzle_volume_type not found, when different_extruder or multiple extruder, new_printer_name %2%, extruder_count %3%")%__LINE__ %new_printer_name %new_extruder_count;
-                //record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
-                //flush_and_exit(CLI_INVALID_PARAMS);
+                if (desktop_parity_mode) {
+                    BOOST_LOG_TRIVIAL(warning) << boost::format("%1%: nozzle_volume_type missing for multi/different extruder profile conversion, attempt derive + fallback.") % __LINE__;
+                    std::vector<std::string> variant_candidates = new_printer_extruder_variants;
+                    if (variant_candidates.empty() && m_print_config.has("print_extruder_variant")) {
+                        variant_candidates = m_print_config.option<ConfigOptionStrings>("print_extruder_variant", true)->values;
+                    }
+                    DesktopParityConnector::recover_nozzle_volume_types_from_variants(new_extruder_count, variant_candidates, new_nozzle_volume_type, record_key_values);
+                } else {
+                    BOOST_LOG_TRIVIAL(error) << boost::format("%1%: nozzle_volume_type missing for multi/different extruder profile conversion.") % __LINE__;
+                    record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+                    flush_and_exit(CLI_INVALID_PARAMS);
+                }
             }
             else
                 BOOST_LOG_TRIVIAL(info) << boost::format("%1%: nozzle_volume_type not found, use standard by default, new_printer_name %2% extruder_count %3%")%__LINE__ %new_printer_name %new_extruder_count;
@@ -6103,6 +6336,8 @@ int CLI::run(int argc, char **argv)
             no_check = m_config.opt_bool(opt_key);
         } else if (opt_key == "skip_precheck") {
             // already parsed from config; affects --slice 0 pre-check behavior.
+        } else if (opt_key == "desktop_parity" || opt_key == "legacy_cli") {
+            // Mode flags are parsed before action execution.
         //} else if (opt_key == "export_gcode" || opt_key == "export_sla" || opt_key == "slice") {
         } else if (opt_key == "normative_check") {
             //already processed before
@@ -6120,6 +6355,23 @@ int CLI::run(int argc, char **argv)
             sliced_plate = plate_to_slice;
             bool pre_check = (plate_to_slice == 0) && !skip_precheck;
             bool finished = false;
+            struct PlateSliceError {
+                int code;
+                std::string message;
+            };
+            auto plate_error_message = [](int code, const std::string& fallback = std::string()) -> std::string {
+                auto it = cli_errors.find(code);
+                if (it != cli_errors.end()) {
+                    return it->second;
+                }
+                return fallback;
+            };
+            std::vector<int> skipped_plate_ids;
+            std::vector<int> skipped_plate_codes;
+            std::vector<std::string> skipped_plate_reasons;
+            int first_skipped_plate_code = 0;
+            std::string first_skipped_plate_reason;
+            int successful_plate_count = 0;
             BOOST_LOG_TRIVIAL(info) << boost::format("slice pre-check enabled=%1% (plate_to_slice=%2%)") % pre_check % plate_to_slice;
 
             /*if (opt_key == "export_gcode" && printer_technology == ptSLA) {
@@ -6171,22 +6423,23 @@ int CLI::run(int argc, char **argv)
                         sliced_plate_info_t sliced_plate_info;
                         sliced_plate_info.plate_id = index+1;
 
-                        model.curr_plate_index = index;
-                        BOOST_LOG_TRIVIAL(info) << boost::format("Plate %1%: pre_check %2%, start")%(index+1)%pre_check;
-                        long long start_time = 0, end_time = 0, temp_time = 0;
+                        try {
+                            model.curr_plate_index = index;
+                            BOOST_LOG_TRIVIAL(info) << boost::format("Plate %1%: pre_check %2%, start")%(index+1)%pre_check;
+                            long long start_time = 0, end_time = 0, temp_time = 0;
 
-                        std::unordered_map<std::string, long long> slice_time;
-                        slice_time[TIME_USING_CACHE] = 0;
-                        slice_time[TIME_MAKE_PERIMETERS] = 0;
-                        slice_time[TIME_INFILL] = 0;
-                        slice_time[TIME_GENERATE_SUPPORT] = 0;
+                            std::unordered_map<std::string, long long> slice_time;
+                            slice_time[TIME_USING_CACHE] = 0;
+                            slice_time[TIME_MAKE_PERIMETERS] = 0;
+                            slice_time[TIME_INFILL] = 0;
+                            slice_time[TIME_GENERATE_SUPPORT] = 0;
 
-                        start_time = (long long)Slic3r::Utils::get_current_milliseconds_time_utc();
-                        //get the current partplate
-                        Slic3r::GUI::PartPlate* part_plate = partplate_list.get_plate(index);
-                        part_plate->get_print(&print, &gcode_result, &print_index);
+                            start_time = (long long)Slic3r::Utils::get_current_milliseconds_time_utc();
+                            //get the current partplate
+                            Slic3r::GUI::PartPlate* part_plate = partplate_list.get_plate(index);
+                            part_plate->get_print(&print, &gcode_result, &print_index);
 
-                        print_fff = dynamic_cast<Print *>(print);
+                            print_fff = dynamic_cast<Print *>(print);
                         /*if (outfile_config.empty())
                         {
                             outfile = "plate_" + std::to_string(index + 1) + ".gcode";
@@ -6211,8 +6464,7 @@ int CLI::run(int argc, char **argv)
 
                         if (count == 0) {
                             BOOST_LOG_TRIVIAL(error) << "plate "<< index+1<< ": Nothing to be sliced, Either the print is empty or no object is fully inside the print volume before apply." << std::endl;
-                            record_exit_reson(outfile_dir, CLI_NO_SUITABLE_OBJECTS, index+1, cli_errors[CLI_NO_SUITABLE_OBJECTS], sliced_info);
-                            flush_and_exit(CLI_NO_SUITABLE_OBJECTS);
+                            throw PlateSliceError{CLI_NO_SUITABLE_OBJECTS, plate_error_message(CLI_NO_SUITABLE_OBJECTS)};
                         }
                         else if ((plate_to_slice != 0) || pre_check) {
                             long long triangle_count = 0;
@@ -6257,8 +6509,7 @@ int CLI::run(int argc, char **argv)
                                     if (i->print_volume_state == ModelInstancePVS_Partly_Outside)
                                     {
                                         BOOST_LOG_TRIVIAL(error) << "plate "<< index+1<< ": Found Object " << model_object->name <<" partly inside, can not be sliced." << std::endl;
-                                        record_exit_reson(outfile_dir, CLI_OBJECTS_PARTLY_INSIDE, index+1, cli_errors[CLI_OBJECTS_PARTLY_INSIDE], sliced_info);
-                                        flush_and_exit(CLI_OBJECTS_PARTLY_INSIDE);
+                                        throw PlateSliceError{CLI_OBJECTS_PARTLY_INSIDE, plate_error_message(CLI_OBJECTS_PARTLY_INSIDE)};
                                     }
                                     else if (i->print_volume_state == ModelInstancePVS_Inside)
                                     {
@@ -6279,8 +6530,7 @@ int CLI::run(int argc, char **argv)
                                                 if ((max_triangle_count_per_plate != 0) && (triangle_count > max_triangle_count_per_plate))
                                                 {
                                                     BOOST_LOG_TRIVIAL(error) << "plate "<< index+1<< ": triangle count " << triangle_count <<" exceeds the limit:" << max_triangle_count_per_plate;
-                                                    record_exit_reson(outfile_dir, CLI_TRIANGLE_COUNT_EXCEEDS_LIMIT, index+1, cli_errors[CLI_TRIANGLE_COUNT_EXCEEDS_LIMIT], sliced_info);
-                                                    flush_and_exit(CLI_TRIANGLE_COUNT_EXCEEDS_LIMIT);
+                                                    throw PlateSliceError{CLI_TRIANGLE_COUNT_EXCEEDS_LIMIT, plate_error_message(CLI_TRIANGLE_COUNT_EXCEEDS_LIMIT)};
                                                 }
 
                                                 if (new_extruder_count > 1) {
@@ -6310,8 +6560,7 @@ int CLI::run(int argc, char **argv)
 
                             if (printable_instances == 0) {
                                 BOOST_LOG_TRIVIAL(error) << "plate "<< index+1<< ": Nothing to be sliced, after skipping "<<skipped_count<<" objects."<< std::endl;
-                                record_exit_reson(outfile_dir, CLI_NO_SUITABLE_OBJECTS_AFTER_SKIP, index+1, cli_errors[CLI_NO_SUITABLE_OBJECTS_AFTER_SKIP], sliced_info);
-                                flush_and_exit(CLI_NO_SUITABLE_OBJECTS_AFTER_SKIP);
+                                throw PlateSliceError{CLI_NO_SUITABLE_OBJECTS_AFTER_SKIP, plate_error_message(CLI_NO_SUITABLE_OBJECTS_AFTER_SKIP)};
                             }
 
                             std::vector<int> plate_filaments = part_plate->get_extruders_under_cli(true, m_print_config);
@@ -6328,8 +6577,7 @@ int CLI::run(int argc, char **argv)
                             bool tpu_valid = part_plate->check_tpu_printable_status(m_print_config, used_tpu_filaments);
                             if (!tpu_valid) {
                                 BOOST_LOG_TRIVIAL(error) << boost::format("plate %1% : Found 2 or more tpu filaments on plate ") % (index + 1);
-                                record_exit_reson(outfile_dir, CLI_ONLY_ONE_TPU_SUPPORTED, index + 1, cli_errors[CLI_ONLY_ONE_TPU_SUPPORTED], sliced_info);
-                                flush_and_exit(CLI_ONLY_ONE_TPU_SUPPORTED);
+                                throw PlateSliceError{CLI_ONLY_ONE_TPU_SUPPORTED, plate_error_message(CLI_ONLY_ONE_TPU_SUPPORTED)};
                             }
 
                             if (new_extruder_count > 1) {
@@ -6372,8 +6620,7 @@ int CLI::run(int argc, char **argv)
                                     if (!conflict_filament_vector.empty())
                                     {
                                         BOOST_LOG_TRIVIAL(error) << boost::format("plate %1% : some filaments can not be mapped under auto mode for multi extruder printer ")% (index + 1);
-                                        record_exit_reson(outfile_dir, CLI_FILAMENT_CAN_NOT_MAP, index + 1, cli_errors[CLI_FILAMENT_CAN_NOT_MAP], sliced_info);
-                                        flush_and_exit(CLI_FILAMENT_CAN_NOT_MAP);
+                                        throw PlateSliceError{CLI_FILAMENT_CAN_NOT_MAP, plate_error_message(CLI_FILAMENT_CAN_NOT_MAP)};
                                     }
                                 }
                                 else {
@@ -6445,8 +6692,7 @@ int CLI::run(int argc, char **argv)
                                                                  "filament_volume_map/filament_nozzle_map/extruder_nozzle_count/extruder_nozzle_volume_type/filament_map under "
                                                                  "Nozzle Manual mode") %
                                                        __LINE__;
-                                            record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, index + 1, cli_errors[CLI_INVALID_PARAMS], sliced_info);
-                                            flush_and_exit(CLI_INVALID_PARAMS);
+                                            throw PlateSliceError{CLI_INVALID_PARAMS, plate_error_message(CLI_INVALID_PARAMS)};
                                         }
 
                                         if (mode == fmmManual) {
@@ -6506,8 +6752,7 @@ int CLI::run(int argc, char **argv)
                                     else if (!support_multi_nozzle && (mode == fmmNozzleManual)) {
                                         BOOST_LOG_TRIVIAL(error)
                                             << boost::format("%1%, Nozzle Manual mode not supported for %2%") % __LINE__ %new_printer_name;
-                                        record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, index + 1, cli_errors[CLI_INVALID_PARAMS], sliced_info);
-                                        flush_and_exit(CLI_INVALID_PARAMS);
+                                        throw PlateSliceError{CLI_INVALID_PARAMS, plate_error_message(CLI_INVALID_PARAMS)};
                                     }
 
                                     // 保存参数到 m_print_config
@@ -6519,8 +6764,7 @@ int CLI::run(int argc, char **argv)
                                         if (unprintable_filament_ids[filament_extruder - 1].find(index + 1) != unprintable_filament_ids[filament_extruder - 1].end())
                                         {
                                             BOOST_LOG_TRIVIAL(error) << boost::format("plate %1% : some filaments can not be mapped under manual mode for multi extruder printer ") % (index + 1);
-                                            record_exit_reson(outfile_dir, CLI_FILAMENT_CAN_NOT_MAP, index + 1, cli_errors[CLI_FILAMENT_CAN_NOT_MAP], sliced_info);
-                                            flush_and_exit(CLI_FILAMENT_CAN_NOT_MAP);
+                                            throw PlateSliceError{CLI_FILAMENT_CAN_NOT_MAP, plate_error_message(CLI_FILAMENT_CAN_NOT_MAP)};
                                         }
                                     }
 
@@ -6538,9 +6782,7 @@ int CLI::run(int argc, char **argv)
                                                             << boost::format(
                                                                    "plate %1% : filament %2% can not be printed on extruder %3%, under manual mode for multi extruder printer") %
                                                                    (index + 1) % filament_type % filament_extruder;
-                                                        record_exit_reson(outfile_dir, CLI_FILAMENTS_NOT_SUPPORTED_BY_EXTRUDER, index + 1,
-                                                                          cli_errors[CLI_FILAMENTS_NOT_SUPPORTED_BY_EXTRUDER], sliced_info);
-                                                        flush_and_exit(CLI_FILAMENTS_NOT_SUPPORTED_BY_EXTRUDER);
+                                                        throw PlateSliceError{CLI_FILAMENTS_NOT_SUPPORTED_BY_EXTRUDER, plate_error_message(CLI_FILAMENTS_NOT_SUPPORTED_BY_EXTRUDER)};
                                                     }
                                                 }
                                             }
@@ -6667,11 +6909,10 @@ int CLI::run(int argc, char **argv)
                                         validate_error = CLI_VALIDATE_ERROR;
                                         break;
                                 }
-                                if (no_check)
-                                    record_exit_reson(outfile_dir, validate_error, index+1, err.string, sliced_info);
-                                else
-                                    record_exit_reson(outfile_dir, validate_error, index+1, cli_errors[validate_error], sliced_info);
-                                flush_and_exit(validate_error);
+                                if (no_check) {
+                                    throw PlateSliceError{validate_error, err.string};
+                                }
+                                throw PlateSliceError{validate_error, plate_error_message(validate_error)};
                             }
                         }
                         else if (!warning.string.empty()) {
@@ -6680,8 +6921,7 @@ int CLI::run(int argc, char **argv)
 
                         if (print->empty()) {
                             BOOST_LOG_TRIVIAL(error) << "plate "<< index+1<< ": Nothing to be sliced, Either the print is empty or no object is fully inside the print volume after apply." << std::endl;
-                            record_exit_reson(outfile_dir, CLI_NO_SUITABLE_OBJECTS, index+1, cli_errors[CLI_NO_SUITABLE_OBJECTS], sliced_info);
-                            flush_and_exit(CLI_NO_SUITABLE_OBJECTS);
+                            throw PlateSliceError{CLI_NO_SUITABLE_OBJECTS, plate_error_message(CLI_NO_SUITABLE_OBJECTS)};
                         }
                         else {
                             if (pre_check && (partplate_list.get_plate_count() > 1)) //continue to next plate directly
@@ -6761,8 +7001,7 @@ int CLI::run(int argc, char **argv)
                                     std::string conflict_result = print_fff->get_conflict_string();
                                     if (!conflict_result.empty()) {
                                        BOOST_LOG_TRIVIAL(error) << "plate "<< index+1<< ": found slicing result conflict!"<< std::endl;
-                                       record_exit_reson(outfile_dir, CLI_GCODE_PATH_CONFLICTS, index+1, cli_errors[CLI_GCODE_PATH_CONFLICTS], sliced_info);
-                                       flush_and_exit(CLI_GCODE_PATH_CONFLICTS);
+                                       throw PlateSliceError{CLI_GCODE_PATH_CONFLICTS, plate_error_message(CLI_GCODE_PATH_CONFLICTS)};
                                     }
 
                                     //check the warnings
@@ -6786,8 +7025,7 @@ int CLI::run(int argc, char **argv)
                                                             || status.message_type == PrintStateBase::SlicingGcodeOverlap)
                                                         {
                                                             sliced_info.sliced_plates.push_back(sliced_plate_info);
-                                                            record_exit_reson(outfile_dir, CLI_SLICING_ERROR, index+1, cli_errors[CLI_SLICING_ERROR], sliced_info);
-                                                            flush_and_exit(CLI_SLICING_ERROR);
+                                                            throw PlateSliceError{CLI_SLICING_ERROR, plate_error_message(CLI_SLICING_ERROR)};
                                                         }
                                                     }
                                                 }
@@ -6843,21 +7081,17 @@ int CLI::run(int argc, char **argv)
                                         BOOST_LOG_TRIVIAL(error) << "plate " << index + 1 << ": found gcode unprintable! gcode_result->gcode_check_result.error_code = "
                                                                  << gcode_result->gcode_check_result.error_code << std::endl;
                                         if (gcode_result->gcode_check_result.error_code & 0b1100) {
-                                            record_exit_reson(outfile_dir, CLI_GCODE_PATH_OUTSIDE, index + 1, cli_errors[CLI_GCODE_PATH_OUTSIDE], sliced_info);
-                                            flush_and_exit(CLI_GCODE_PATH_OUTSIDE);
+                                            throw PlateSliceError{CLI_GCODE_PATH_OUTSIDE, plate_error_message(CLI_GCODE_PATH_OUTSIDE)};
                                         } else if (gcode_result->gcode_check_result.error_code & 0b10000) {
-                                            record_exit_reson(outfile_dir, CLI_GCODE_IN_WRAPPING_DETECT_AREA, index + 1, cli_errors[CLI_GCODE_IN_WRAPPING_DETECT_AREA], sliced_info);
-                                            flush_and_exit(CLI_GCODE_IN_WRAPPING_DETECT_AREA);
+                                            throw PlateSliceError{CLI_GCODE_IN_WRAPPING_DETECT_AREA, plate_error_message(CLI_GCODE_IN_WRAPPING_DETECT_AREA)};
                                         } else if (gcode_result->gcode_check_result.error_code & 0b00011) {
-                                            record_exit_reson(outfile_dir, CLI_GCODE_PATH_IN_UNPRINTABLE_AREA, index + 1, cli_errors[CLI_GCODE_PATH_IN_UNPRINTABLE_AREA], sliced_info);
-                                            flush_and_exit(CLI_GCODE_PATH_IN_UNPRINTABLE_AREA);
+                                            throw PlateSliceError{CLI_GCODE_PATH_IN_UNPRINTABLE_AREA, plate_error_message(CLI_GCODE_PATH_IN_UNPRINTABLE_AREA)};
                                         }
                                     }
 
                                     if (gcode_result && gcode_result->filament_printable_reuslt.has_value()) {
                                         BOOST_LOG_TRIVIAL(error) << "plate " << index + 1 << ": found some filament unprintable on current bed- " << gcode_result->filament_printable_reuslt.plate_name << std::endl;
-                                        record_exit_reson(outfile_dir, CLI_FILAMENT_UNPRINTABLE_ON_FIRST_LAYER, index + 1, cli_errors[CLI_FILAMENT_UNPRINTABLE_ON_FIRST_LAYER], sliced_info);
-                                        flush_and_exit(CLI_FILAMENT_UNPRINTABLE_ON_FIRST_LAYER);
+                                        throw PlateSliceError{CLI_FILAMENT_UNPRINTABLE_ON_FIRST_LAYER, plate_error_message(CLI_FILAMENT_UNPRINTABLE_ON_FIRST_LAYER)};
                                     }
                                 }
 
@@ -6872,8 +7106,7 @@ int CLI::run(int argc, char **argv)
                                 /*if (outfile != outfile_final) {
                                     if (Slic3r::rename_file(outfile, outfile_final)) {
                                         boost::nowide::cerr << "Renaming file " << outfile << " to " << outfile_final << " failed" << std::endl;
-                                        record_exit_reson(outfile_dir, 1, index+1, cli_errors[1], sliced_info);
-                                        flush_and_exit(1);
+                                        throw PlateSliceError{1, plate_error_message(1)};
                                     }
                                     outfile = outfile_final;
                                 }*/
@@ -6897,8 +7130,7 @@ int CLI::run(int argc, char **argv)
                                         export_slicedata_error = true;
                                         if (fs::exists(plate_dir))
                                             fs::remove_all(plate_dir);
-                                        record_exit_reson(outfile_dir, ret, index+1, cli_errors[ret], sliced_info);
-                                        flush_and_exit(ret);
+                                        throw PlateSliceError{ret, plate_error_message(ret)};
                                     }
                                     BOOST_LOG_TRIVIAL(info) << boost::format("plate %1% exported %2% objects")%(index+1) %(sliced_plate_info.obj_cached_cnt);
                                 } else if (export_slicedata && skip_gcode_export) {
@@ -7002,18 +7234,33 @@ int CLI::run(int argc, char **argv)
                                         sliced_plate_info.warning_message = (boost::format("plate %1%'s slice time %2% exceeds the limit %3%, return error.")%(index+1) %time_cost %(max_slicing_time_per_plate * 1000)).str();
                                         BOOST_LOG_TRIVIAL(error) << sliced_plate_info.warning_message;
                                         sliced_info.sliced_plates.push_back(sliced_plate_info);
-                                        record_exit_reson(outfile_dir, CLI_SLICING_TIME_EXCEEDS_LIMIT, index+1, cli_errors[CLI_SLICING_TIME_EXCEEDS_LIMIT], sliced_info);
-                                        flush_and_exit(CLI_SLICING_TIME_EXCEEDS_LIMIT);
+                                        throw PlateSliceError{CLI_SLICING_TIME_EXCEEDS_LIMIT, plate_error_message(CLI_SLICING_TIME_EXCEEDS_LIMIT)};
                                     }
                                 }
                                 sliced_info.sliced_plates.push_back(sliced_plate_info);
+                                successful_plate_count++;
                             } catch (const std::exception &ex) {
                                 BOOST_LOG_TRIVIAL(error) << "found slicing or export error for partplate "<<index+1 << std::endl;
                                 boost::nowide::cerr << ex.what() << std::endl;
-                                //continue;
-                                record_exit_reson(outfile_dir, CLI_SLICING_ERROR, index+1, cli_errors[CLI_SLICING_ERROR], sliced_info);
-                                flush_and_exit(CLI_SLICING_ERROR);
+                                throw PlateSliceError{CLI_SLICING_ERROR, plate_error_message(CLI_SLICING_ERROR)};
                             }
+                        }
+                        } catch (const PlateSliceError& plate_err) {
+                            const std::string reason = plate_err.message.empty() ? plate_error_message(plate_err.code) : plate_err.message;
+                            if (DesktopParityConnector::should_continue_plate_failures(desktop_parity_mode, plate_to_slice)) {
+                                skipped_plate_ids.push_back(index + 1);
+                                skipped_plate_codes.push_back(plate_err.code);
+                                skipped_plate_reasons.push_back(reason);
+                                if (first_skipped_plate_code == 0) {
+                                    first_skipped_plate_code = plate_err.code;
+                                    first_skipped_plate_reason = reason;
+                                }
+                                BOOST_LOG_TRIVIAL(warning) << boost::format("Plate %1% skipped after recoverable failure: %2% (%3%)")
+                                    % (index + 1) % reason % plate_err.code;
+                                continue;
+                            }
+                            record_exit_reson(outfile_dir, plate_err.code, index + 1, reason, sliced_info);
+                            flush_and_exit(plate_err.code);
                         }
                     }
                     if (pre_check&& (partplate_list.get_plate_count() > 1))
@@ -7028,6 +7275,24 @@ int CLI::run(int argc, char **argv)
                     g_cli_callback_mgr.set_plate_info(0, plate_count);
                 }
 #endif
+                if (DesktopParityConnector::should_continue_plate_failures(desktop_parity_mode, plate_to_slice) && successful_plate_count == 0 && !skipped_plate_codes.empty()) {
+                    std::map<std::string, std::string> marker_values;
+                    marker_values["failure_marker"] = "all_plates_failed";
+                    marker_values["skipped_plate_count"] = std::to_string(skipped_plate_codes.size());
+                    marker_values["skipped_plate_ids"] = DesktopParityConnector::join_int_values(skipped_plate_ids, ",");
+                    marker_values["skipped_plate_codes"] = DesktopParityConnector::join_int_values(skipped_plate_codes, ",");
+                    const int fail_code = first_skipped_plate_code == 0 ? CLI_NO_SUITABLE_OBJECTS : first_skipped_plate_code;
+                    const std::string fail_reason = first_skipped_plate_reason.empty() ? plate_error_message(fail_code) : first_skipped_plate_reason;
+                    record_exit_reson(outfile_dir, fail_code, 0, fail_reason, sliced_info, marker_values);
+                    flush_and_exit(fail_code);
+                }
+                if (DesktopParityConnector::should_continue_plate_failures(desktop_parity_mode, plate_to_slice) && !skipped_plate_codes.empty()) {
+                    record_key_values["partial_plate_failures"] = "true";
+                    record_key_values["skipped_plate_ids"] = DesktopParityConnector::join_int_values(skipped_plate_ids, ",");
+                    record_key_values["skipped_plate_codes"] = DesktopParityConnector::join_int_values(skipped_plate_codes, ",");
+                    record_key_values["skipped_plate_reasons"] = DesktopParityConnector::join_string_values(skipped_plate_reasons, " | ");
+                    record_key_values["successful_plate_count"] = std::to_string(successful_plate_count);
+                }
 /*
                 print.center = ! m_config.has("center")
                     && ! m_config.has("align_xy")
@@ -7083,16 +7348,26 @@ int CLI::run(int argc, char **argv)
         else if (sliced_plate == 0){
             //slicing all
             for (int i = 0; i < plate_data_list.size(); i++) {
+                PlateData *plate_data = plate_data_list[i];
+                if (!plate_data) {
+                    BOOST_LOG_TRIVIAL(warning) << boost::format("plate %1% has null PlateData after slicing, skip label-object update") % (i + 1);
+                    continue;
+                }
                 if (skip_useless_pick && (plate_object_count[i] == 1)) {
-                    BOOST_LOG_TRIVIAL(info) << boost::format("only has 1 object,  set plate %1%'s is_label_object_enabled from %2% to false")%(i+1) % (plate_data_list[i]->is_label_object_enabled);
-                    plate_data_list[i]->is_label_object_enabled = false;
+                    BOOST_LOG_TRIVIAL(info) << boost::format("only has 1 object,  set plate %1%'s is_label_object_enabled from %2% to false")%(i+1) % (plate_data->is_label_object_enabled);
+                    plate_data->is_label_object_enabled = false;
                 }
             }
         }
         else {
-            if (skip_useless_pick && (plate_object_count[sliced_plate - 1] == 1)) {
-                BOOST_LOG_TRIVIAL(info) << boost::format("only has 1 object,  set plate %1%'s is_label_object_enabled from %2% to false")%sliced_plate % (plate_data_list[sliced_plate - 1]->is_label_object_enabled);
-                plate_data_list[sliced_plate - 1]->is_label_object_enabled = false;
+            PlateData *plate_data = ((sliced_plate - 1) >= 0 && (sliced_plate - 1) < static_cast<int>(plate_data_list.size()))
+                ? plate_data_list[sliced_plate - 1]
+                : nullptr;
+            if (!plate_data) {
+                BOOST_LOG_TRIVIAL(warning) << boost::format("plate %1% has null PlateData after slicing, skip label-object update") % sliced_plate;
+            } else if (skip_useless_pick && (plate_object_count[sliced_plate - 1] == 1)) {
+                BOOST_LOG_TRIVIAL(info) << boost::format("only has 1 object,  set plate %1%'s is_label_object_enabled from %2% to false")%sliced_plate % (plate_data->is_label_object_enabled);
+                plate_data->is_label_object_enabled = false;
             }
         }
 
@@ -7123,6 +7398,10 @@ int CLI::run(int argc, char **argv)
 
         for (int i = 0; i < plate_data_list.size(); i++) {
             PlateData *plate_data = plate_data_list[i];
+            if (!plate_data) {
+                BOOST_LOG_TRIVIAL(warning) << boost::format("plate %1% has null PlateData, skip thumbnail metadata update") % (i + 1);
+                continue;
+            }
             bool skip_this_plate = ((plate_to_slice != 0) && (plate_to_slice != (i + 1)))?true:false;
 
             plate_data->skipped_objects = plate_skipped_objects[i];
@@ -7134,13 +7413,25 @@ int CLI::run(int argc, char **argv)
             for (auto it = plate_data->slice_filaments_info.begin(); it != plate_data->slice_filaments_info.end(); it++) {
                 std::string display_filament_type;
                 it->type  = m_print_config.get_filament_type(display_filament_type, it->id);
-                it->color = filament_color ? filament_color->get_at(it->id) : "#FFFFFF";
-                it->filament_id = filament_id?filament_id->get_at(it->id):"";
+                if (filament_color && it->id >= 0 && static_cast<size_t>(it->id) < filament_color->size())
+                    it->color = filament_color->get_at(it->id);
+                else
+                    it->color = "#FFFFFF";
+
+                if (filament_id && it->id >= 0 && static_cast<size_t>(it->id) < filament_id->size())
+                    it->filament_id = filament_id->get_at(it->id);
+                else
+                    it->filament_id.clear();
             }
 
             if (!plate_data->plate_thumbnail.is_valid()) {
-                if (!oriented_or_arranged && !regenerate_thumbnails && plate_data_src.size() > i)
-                    plate_data->thumbnail_file = plate_data_src[i]->thumbnail_file;
+                if (!oriented_or_arranged && !regenerate_thumbnails && plate_data_src.size() > i) {
+                    if (plate_data_src[i]) {
+                        plate_data->thumbnail_file = plate_data_src[i]->thumbnail_file;
+                    } else {
+                        BOOST_LOG_TRIVIAL(warning) << boost::format("plate %1% has null source PlateData, skip loading thumbnail file path") % (i + 1);
+                    }
+                }
                 BOOST_LOG_TRIVIAL(info) << boost::format("thumbnails stage: plate %1%'s thumbnail data is invalid, check the file %2% exist or not")%(i+1) %plate_data->thumbnail_file;
                 if (plate_data->thumbnail_file.empty() || (!boost::filesystem::exists(plate_data->thumbnail_file))) {
                     BOOST_LOG_TRIVIAL(info) << boost::format("thumbnails stage: plate %1%'s thumbnail file also not there, need to regenerate")%(i+1);
@@ -7169,7 +7460,11 @@ int CLI::run(int argc, char **argv)
 
             if (plate_data->no_light_thumbnail_file.empty()) {
                 if (!regenerate_thumbnails && (plate_data_src.size() > i)) {
-                    plate_data->no_light_thumbnail_file = plate_data_src[i]->no_light_thumbnail_file;
+                    if (plate_data_src[i]) {
+                        plate_data->no_light_thumbnail_file = plate_data_src[i]->no_light_thumbnail_file;
+                    } else {
+                        BOOST_LOG_TRIVIAL(warning) << boost::format("plate %1% has null source PlateData, skip loading no-light thumbnail file path") % (i + 1);
+                    }
                 }
                 if (plate_data->no_light_thumbnail_file.empty() || (!boost::filesystem::exists(plate_data->no_light_thumbnail_file))) {
                     BOOST_LOG_TRIVIAL(info) << boost::format("thumbnails stage: plate %1%'s no_light_thumbnail_file %2% also not there, need to regenerate")%(i+1)%plate_data->no_light_thumbnail_file;
@@ -7190,8 +7485,12 @@ int CLI::run(int argc, char **argv)
 
             if (plate_data->top_file.empty() || plate_data->pick_file.empty()) {
                 if (!regenerate_thumbnails && (plate_data_src.size() > i)) {
-                    plate_data->top_file = plate_data_src[i]->top_file;
-                    plate_data->pick_file = plate_data_src[i]->pick_file;
+                    if (plate_data_src[i]) {
+                        plate_data->top_file = plate_data_src[i]->top_file;
+                        plate_data->pick_file = plate_data_src[i]->pick_file;
+                    } else {
+                        BOOST_LOG_TRIVIAL(warning) << boost::format("plate %1% has null source PlateData, skip loading top/pick thumbnail file paths") % (i + 1);
+                    }
                 }
                 if (plate_data->top_file.empty()|| plate_data->pick_file.empty()
                     || (!boost::filesystem::exists(plate_data->top_file)) || (!boost::filesystem::exists(plate_data->pick_file))) {
@@ -7339,6 +7638,10 @@ int CLI::run(int argc, char **argv)
                         for (int i = 0; i < partplate_list.get_plate_count(); i++) {
                             Slic3r::GUI::PartPlate *part_plate      = partplate_list.get_plate(i);
                             PlateData *plate_data = plate_data_list[i];
+                            if (!plate_data) {
+                                BOOST_LOG_TRIVIAL(warning) << boost::format("plate %1% has null PlateData, skip thumbnail rendering") % (i + 1);
+                                continue;
+                            }
                             if (plate_data->plate_thumbnail.is_valid()) {
                                 if ((plate_to_slice != 0) && (plate_to_slice != (i + 1))) {
                                     BOOST_LOG_TRIVIAL(info) << boost::format("Line %1%: regenerate thumbnail, reset plate %2%'s thumbnail.")%__LINE__%(i+1);
@@ -7511,6 +7814,10 @@ int CLI::run(int argc, char **argv)
             BOOST_LOG_TRIVIAL(info) << boost::format("Line %1%: use previous thumbnails, no need to regenerate")%__LINE__;
             for (int i = 0; i < partplate_list.get_plate_count(); i++) {
                 PlateData *plate_data = plate_data_list[i];
+                if (!plate_data) {
+                    BOOST_LOG_TRIVIAL(warning) << boost::format("plate %1% has null PlateData, skip non-regenerated thumbnail handling") % (i + 1);
+                    continue;
+                }
                 bool skip_this_plate = ((plate_to_slice != 0) && (plate_to_slice != (i + 1)))?true:false;
                 Slic3r::GUI::PartPlate *part_plate      = partplate_list.get_plate(i);
 
@@ -7543,6 +7850,10 @@ int CLI::run(int argc, char **argv)
 
             for (int i = 0; i < partplate_list.get_plate_count(); i++) {
                 PlateData *plate_data = plate_data_list[i];
+                if (!plate_data) {
+                    BOOST_LOG_TRIVIAL(warning) << boost::format("plate %1% has null PlateData, skip thumbnail grouping") % (i + 1);
+                    continue;
+                }
                 Slic3r::GUI::PartPlate *part_plate      = partplate_list.get_plate(i);
 
                 if (need_create_thumbnail_group) {
@@ -7677,6 +7988,11 @@ int CLI::run(int argc, char **argv)
             plate_bbox->bbox_all = { bbox_all.min.x(),bbox_all.min.y(),bbox_all.max.x(),bbox_all.max.y() };
 
             PlateData *plate_data = plate_data_list[i];
+            if (!plate_data) {
+                BOOST_LOG_TRIVIAL(warning) << boost::format("plate %1% has null PlateData, use empty bbox metadata") % (i + 1);
+                plate_bboxes.push_back(plate_bbox);
+                continue;
+            }
             for (auto it = plate_data->slice_filaments_info.begin(); it != plate_data->slice_filaments_info.end(); it++) {
                 plate_bbox->filament_ids.push_back(it->id);
                 plate_bbox->filament_colors.push_back(it->color);
@@ -7895,9 +8211,11 @@ bool CLI::setup(int argc, char **argv)
     }
     // Parse actions and transform options.
     for (auto const &opt_key : opt_order) {
-        if (cli_actions_config_def.has(opt_key))
+        if (cli_actions_config_def.has(opt_key)) {
+            if (opt_key == "desktop_parity" || opt_key == "legacy_cli")
+                continue;
             m_actions.emplace_back(opt_key);
-        else if (cli_transform_config_def.has(opt_key))
+        } else if (cli_transform_config_def.has(opt_key))
             m_transforms.emplace_back(opt_key);
     }
 
@@ -7918,6 +8236,9 @@ bool CLI::setup(int argc, char **argv)
             boost::nowide::cerr << it->first <<": "<< it->second << std::endl;
         return false;
     }
+
+    g_cli_desktop_parity_mode = DesktopParityConnector::is_enabled(m_config);
+    g_cli_desktop_parity_mode_known = true;
 
     return true;
 }

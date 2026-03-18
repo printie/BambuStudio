@@ -8112,13 +8112,24 @@ void DynamicPrintConfig::update_values_to_printer_extruders_for_multiple_filamen
     //if (extruder_nozzle_volume_count > 1)
     {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(", Line %1%: different nozzle volume processing")%__LINE__;
-        std::vector<int> filament_maps =  printer_config.option<ConfigOptionInts>("filament_map")->values;
+        auto opt_filament_maps = printer_config.option<ConfigOptionInts>("filament_map");
+        if (!opt_filament_maps) {
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(", Line %1%: missing filament_map") % __LINE__;
+            return;
+        }
+
+        std::vector<int> filament_maps = opt_filament_maps->values;
         size_t filament_count = filament_maps.size();
         //apply process settings
         //auto opt_nozzle_diameters = this->option<ConfigOptionFloats>("nozzle_diameter");
         //int extruder_count = opt_nozzle_diameters->size();
         auto opt_extruder_type = dynamic_cast<const ConfigOptionEnumsGeneric*>(printer_config.option("extruder_type"));
         auto opt_nozzle_volume_type = dynamic_cast<const ConfigOptionEnumsGeneric*>(printer_config.option("nozzle_volume_type"));
+        if (!opt_extruder_type || !opt_nozzle_volume_type) {
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(", Line %1%: missing extruder_type/nozzle_volume_type, extruder_type=%2%, nozzle_volume_type=%3%")
+                % __LINE__ % static_cast<int>(opt_extruder_type != nullptr) % static_cast<int>(opt_nozzle_volume_type != nullptr);
+            return;
+        }
 
         auto opt_filament_volume_maps = dynamic_cast<const ConfigOptionInts*>(printer_config.option("filament_volume_map"));
         std::vector<int> filament_volume_maps;
@@ -8131,8 +8142,14 @@ void DynamicPrintConfig::update_values_to_printer_extruders_for_multiple_filamen
 
         for (int f_index = 0; f_index < filament_count; f_index++)
         {
-            ExtruderType extruder_type = (ExtruderType)(opt_extruder_type->get_at(filament_maps[f_index] - 1));
-            NozzleVolumeType nozzle_volume_type = (NozzleVolumeType)(opt_nozzle_volume_type->get_at(filament_maps[f_index] - 1));
+            int extruder_slot = filament_maps[f_index] - 1;
+            if (extruder_slot < 0 || extruder_slot >= opt_extruder_type->size() || extruder_slot >= opt_nozzle_volume_type->size()) {
+                BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(", Line %1%: invalid filament_map index %2% for filament %3% (extruder_type size %4%, nozzle_volume_type size %5%)")
+                    % __LINE__ % filament_maps[f_index] % (f_index + 1) % opt_extruder_type->size() % opt_nozzle_volume_type->size();
+                continue;
+            }
+            ExtruderType extruder_type = (ExtruderType)(opt_extruder_type->get_at(extruder_slot));
+            NozzleVolumeType nozzle_volume_type = (NozzleVolumeType)(opt_nozzle_volume_type->get_at(extruder_slot));
 
             if ((extruder_nozzle_volume_count > extruder_count)&&(!filament_volume_maps.empty())) {
                 nozzle_volume_type = (NozzleVolumeType)(filament_volume_maps[f_index]);
@@ -8169,10 +8186,24 @@ void DynamicPrintConfig::update_values_to_printer_extruders_for_multiple_filamen
                 BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(", Line %1%: can not find opt define for %2%")%__LINE__%key;
                 continue;
             }
+            ConfigOption *opt_raw = this->option(key);
+            if (!opt_raw) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(", Line %1%: option %2% is missing in current config, skip update") % __LINE__ % key;
+                continue;
+            }
+            if (opt_raw->type() != optdef->type) {
+                BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(", Line %1%: option %2% type mismatch, current type=%3%, expected type=%4%, skip update")
+                    % __LINE__ % key % static_cast<int>(opt_raw->type()) % static_cast<int>(optdef->type);
+                continue;
+            }
             switch (optdef->type) {
                 case coStrings:
                 {
                     ConfigOptionStrings * opt = this->option<ConfigOptionStrings>(key);
+                    if (!opt) {
+                        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(", Line %1%: failed cast for option %2% as coStrings") % __LINE__ % key;
+                        break;
+                    }
                     std::vector<std::string> new_values;
 
                     new_values.resize(filament_count);
@@ -8186,6 +8217,10 @@ void DynamicPrintConfig::update_values_to_printer_extruders_for_multiple_filamen
                 case coInts:
                 {
                     ConfigOptionInts * opt = this->option<ConfigOptionInts>(key);
+                    if (!opt) {
+                        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(", Line %1%: failed cast for option %2% as coInts") % __LINE__ % key;
+                        break;
+                    }
                     std::vector<int> new_values;
 
                     new_values.resize(filament_count);
@@ -8199,6 +8234,10 @@ void DynamicPrintConfig::update_values_to_printer_extruders_for_multiple_filamen
                 case coFloats:
                 {
                     ConfigOptionFloats * opt = this->option<ConfigOptionFloats>(key);
+                    if (!opt) {
+                        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(", Line %1%: failed cast for option %2% as coFloats") % __LINE__ % key;
+                        break;
+                    }
                     std::vector<double> new_values;
 
                     new_values.resize(filament_count);
@@ -8212,6 +8251,10 @@ void DynamicPrintConfig::update_values_to_printer_extruders_for_multiple_filamen
                 case coPercents:
                 {
                     ConfigOptionPercents * opt = this->option<ConfigOptionPercents>(key);
+                    if (!opt) {
+                        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(", Line %1%: failed cast for option %2% as coPercents") % __LINE__ % key;
+                        break;
+                    }
                     std::vector<double> new_values;
 
                     new_values.resize(filament_count);
@@ -8225,6 +8268,10 @@ void DynamicPrintConfig::update_values_to_printer_extruders_for_multiple_filamen
                 case coFloatsOrPercents:
                 {
                     ConfigOptionFloatsOrPercents * opt = this->option<ConfigOptionFloatsOrPercents>(key);
+                    if (!opt) {
+                        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(", Line %1%: failed cast for option %2% as coFloatsOrPercents") % __LINE__ % key;
+                        break;
+                    }
                     std::vector<FloatOrPercent> new_values;
 
                     new_values.resize(filament_count);
@@ -8238,6 +8285,10 @@ void DynamicPrintConfig::update_values_to_printer_extruders_for_multiple_filamen
                 case coBools:
                 {
                     ConfigOptionBools * opt = this->option<ConfigOptionBools>(key);
+                    if (!opt) {
+                        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(", Line %1%: failed cast for option %2% as coBools") % __LINE__ % key;
+                        break;
+                    }
                     std::vector<unsigned char> new_values;
 
                     new_values.resize(filament_count);
@@ -8251,6 +8302,10 @@ void DynamicPrintConfig::update_values_to_printer_extruders_for_multiple_filamen
                 case coEnums:
                 {
                     ConfigOptionEnumsGeneric * opt = this->option<ConfigOptionEnumsGeneric>(key);
+                    if (!opt) {
+                        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(", Line %1%: failed cast for option %2% as coEnums") % __LINE__ % key;
+                        break;
+                    }
                     std::vector<int> new_values;
 
                     new_values.resize(filament_count);
@@ -9091,6 +9146,18 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def = this->add("downward_check", coBool);
     def->label = "downward machines check";
     def->tooltip = "if enabled, check whether current machine downward compatible with the machines in the list";
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("desktop_parity", coBool);
+    def->label = "Desktop parity mode";
+    def->tooltip = "Use desktop-equivalent load and slice recovery policies for CLI operations.";
+    def->cli = "desktop-parity";
+    def->set_default_value(new ConfigOptionBool(true));
+
+    def = this->add("legacy_cli", coBool);
+    def->label = "Legacy CLI mode";
+    def->tooltip = "Force legacy CLI behavior and disable desktop-parity orchestration.";
+    def->cli = "legacy-cli";
     def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("downward_settings", coStrings);
