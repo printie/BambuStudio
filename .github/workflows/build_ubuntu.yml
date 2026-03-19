@@ -1,6 +1,7 @@
-name: Build Linux
+name: Build Linux (legacy manual)
 
-on: [pull_request]
+on:
+  workflow_dispatch:
 
 jobs:
   appimage-builder:
